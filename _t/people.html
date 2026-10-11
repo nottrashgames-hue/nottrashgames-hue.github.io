@@ -1,0 +1,22 @@
+<!DOCTYPE html><html><head><script type="importmap">{ "imports": { "three": "https://esm.sh/three@0.169.0", "three/addons/": "https://esm.sh/three@0.169.0/examples/jsm/", "@dimforge/rapier3d-compat": "https://esm.sh/@dimforge/rapier3d-compat@0.14.0" } }</script>
+<style>body{margin:0}canvas{display:block}</style></head><body><script type="module">
+import * as THREE from 'three';
+import { Character } from '../character.js';
+import { makeLook } from '../people.js';
+const r = new THREE.WebGLRenderer({antialias:true}); r.setSize(innerWidth, innerHeight); document.body.appendChild(r.domElement);
+r.toneMapping = THREE.ACESFilmicToneMapping;
+const s = new THREE.Scene(); s.background = new THREE.Color(0xa9c1d6);
+s.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.4));
+const d = new THREE.DirectionalLight(0xffffff, 2.2); d.position.set(3, 6, 8); s.add(d);
+const q = new URLSearchParams(location.search);
+const N = +(q.get('n') || 10);
+for (let i = 0; i < N; i++) {
+  const c = new Character(s, makeLook());
+  c.reset(new THREE.Vector3((i - (N - 1) / 2) * 0.75, 0, 0), 0);
+  for (let k = 0; k < 5; k++) c.update(0.016, { move: new THREE.Vector3(), run: false, jump: false, camYaw: Math.PI });
+}
+const cam = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.05, 100);
+const v = (q.get('cam') || '0,1.2,9').split(',').map(Number), t = (q.get('at') || '0,0.95,0').split(',').map(Number);
+cam.position.set(...v); cam.lookAt(...t);
+r.render(s, cam);
+</script></body></html>

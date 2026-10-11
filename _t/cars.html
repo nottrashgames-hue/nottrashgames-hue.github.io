@@ -1,0 +1,54 @@
+<!DOCTYPE html><html><head><script type="importmap">{ "imports": { "three": "https://esm.sh/three@0.169.0", "three/addons/": "https://esm.sh/three@0.169.0/examples/jsm/" } }</script>
+<style>body{margin:0}canvas{display:block}</style></head><body><script type="module">
+// model check: a grid of views of the car models in one frame (?lo=1 for the far LOD)
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { buildCar } from '../carmodel.js';
+const r = new THREE.WebGLRenderer({ antialias: true }); r.setSize(innerWidth, innerHeight); document.body.appendChild(r.domElement);
+r.shadowMap.enabled = true; r.toneMapping = THREE.ACESFilmicToneMapping; r.setScissorTest(true);
+const pm = new THREE.PMREMGenerator(r), env = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+const s = new THREE.Scene(); s.background = new THREE.Color(0xa9c1d6);
+s.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+const d = new THREE.DirectionalLight(0xffffff, 2.5); d.position.set(5, 10, 6); d.castShadow = true; d.shadow.mapSize.set(2048, 2048); d.shadow.bias = -0.0004; d.shadow.normalBias = 0.02;
+Object.assign(d.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8 }); s.add(d);
+if (new URLSearchParams(location.search).get('game')) { d.position.set(22, 40, 15); Object.assign(d.shadow.camera, { left: -24, right: 24, top: 24, bottom: -24, far: 140 }); d.shadow.camera.updateProjectionMatrix(); }
+const g = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStandardMaterial({ color: 0x555555 })); g.rotation.x = -Math.PI / 2; g.receiveShadow = true; s.add(g);
+const q = new URLSearchParams(location.search);
+const cars = [buildCar('sedan', 0xb0302a, env, 0), buildCar('hatch', 0x2a4d8f, env, 1), buildCar('taxi', 0xf2b705, env, 2)];
+cars[0].root.position.set(0, 0, 0); cars[1].root.position.set(6, 0, 0); cars[2].root.position.set(-6, 0, 0);
+for (const c of cars) { s.add(c.root); if (q.get('lo')) c.hi.visible = false; else c.lo.visible = false; c.root.updateMatrixWorld(true); }
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+// ?blood=1: spray the sedan, soak a tyre (stain + tyre shader check)
+if (q.get('blood')) {
+  const { dropHitsCar, tyreMat } = await import('../carstain.js');
+  const { carMats } = await import('../carmodel.js');
+  const c = cars[0];
+  const car = { S: c.spec, m: c, p: V(0, 0, 0), q: new THREE.Quaternion(), velAt: (p, o) => o.set(0, 0, 0) };
+  for (let i = 0; i < 400; i++) {
+    const from = V(0.6 + Math.random() * 0.6, 1.2 + Math.random() * 0.4, 3.2), d = V(-0.2 + Math.random() * -0.5, -0.1 - Math.random() * 0.4, -1).normalize();
+    const vel = d.multiplyScalar(6), a = from.clone();
+    for (let k = 0; k < 200; k++) { const b = a.clone().addScaledVector(vel, 0.01); vel.y -= 0.098; if (dropHitsCar(car, a, b, vel, 0.01 + Math.random() * 0.02, 0.9)) break; a.copy(b); }
+  }
+  for (let t = 0; t < 120; t++) car.stain.update(1 / 30, { n: 1 });
+  car.stain.tex.needsUpdate = true;
+  const sec = new Float32Array(24); for (let j = 0; j < 24; j++) sec[j] = j < 10 ? 0.9 : 0;
+  c.wheels[0].spin.material = tyreMat(carMats().wheel, sec, c.spec.r, c.spec.rimR);
+}
+const views = [
+  [V(4.5, 2.2, 5), V(0, 0.7, 0)], [V(-4, 2, -5), V(0, 0.7, 0)], [V(0.2, 5.5, 0.3), V(0, 0.4, 0)],
+  [V(1.2, 1.5, 3.4), V(0, 0.6, 2.2)], [V(-1, 1.4, -3.4), V(0, 0.7, -2.2)], [V(2.2, 1.7, 0.2), V(-0.2, 0.8, 0)],
+  [V(10.5, 2.2, 5), V(6, 0.7, 0)], [V(3, 2.5, -5), V(6, 0.7, 0)], [V(-3, 2.6, 4.5), V(-6, 0.8, 0)],
+];
+if (q.get('side')) views.splice(0, 9,
+  [V(3.2, 1.0, 0.5), V(0, 0.7, 0)], [V(3, 1.3, 2.5), V(0.8, 0.7, 0)], [V(3, 0.9, -2.5), V(0.8, 0.7, 0)],
+  [V(-3.2, 1.0, 0.5), V(0, 0.7, 0)], [V(-3, 1.3, 2.5), V(-0.8, 0.7, 0)], [V(-3, 0.9, -2.5), V(-0.8, 0.7, 0)],
+  [V(9.2, 1.0, 0.5), V(6, 0.7, 0)], [V(-9.2, 1.1, 0.5), V(-6, 0.7, 0)], [V(-2.8, 1.2, 1.5), V(-6, 0.7, 0)]);
+const cam = new THREE.PerspectiveCamera(40, 1, 0.05, 100);
+const cw = innerWidth / 3, ch = innerHeight / 3;
+views.forEach(([p, t], i) => {
+  const x = (i % 3) * cw, y = innerHeight - (Math.floor(i / 3) + 1) * ch;
+  r.setViewport(x, y, cw, ch); r.setScissor(x, y, cw, ch);
+  cam.aspect = cw / ch; cam.updateProjectionMatrix(); cam.position.copy(p); cam.lookAt(t);
+  r.render(s, cam);
+});
+</script></body></html>

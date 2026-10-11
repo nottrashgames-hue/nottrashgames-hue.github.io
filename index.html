@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Bloodline</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#000000" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <script>
+    // (only there to make the page installable; the game itself needs no offline cache)
+    if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  </script>
+  <script src="vrgrant.js"></script>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="mobile.css" />
+  <script type="importmap">
+    { "imports": {
+      "three": "./vendor/three.module.min.js",
+      "three/addons/": "./vendor/addons/",
+      "@dimforge/rapier3d-compat": "./vendor/rapier.mjs"
+    } }
+  </script>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="chat-compose"><span id="chat-to" hidden></span><input id="chat" maxlength="140" autocomplete="off" spellcheck="false" placeholder="Say something…"><button id="chat-send" type="button">Send</button></div>
+  <div id="hint"><b>R</b> sandbox · <b>Esc</b> menu</div>
+  <div id="cross"></div>
+  <div id="hitmark"><i></i><i></i><i></i><i></i></div>
+  <div id="killflash"></div>
+  <div id="ammo"></div>
+  <div id="nades" class="gone"></div>
+  <div id="med"></div>
+  <div id="veil"></div>
+  <div id="cash"></div>
+  <div id="wanted"></div>
+  <div id="cashpop"></div>
+  <div id="banner"></div>
+  <div id="npc-tags" aria-hidden="true"></div>
+  <div id="hotbar" aria-label="Weapon hotbar"></div>
+  <div id="sandbox-menu"></div>
+  <div id="mobile-ui">
+    <div id="m-stick"><div id="m-knob"></div></div>
+    <div class="m-top">
+      <button id="m-chat" aria-label="Chat"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></button>
+      <button id="m-emote" aria-label="Emotes"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 14.2c1.8 2.2 5.2 2.2 7 0M9 9.6v.1M15 9.6v.1"/></svg></button>
+      <button id="m-menu" aria-label="More actions" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/></svg></button>
+    </div>
+    <div id="m-pad">
+      <button data-m="attack" class="m-attack">Punch</button>
+      <button data-m="jump">Jump</button>
+      <button data-m="aim">Aim</button>
+      <button data-m="crouch">Crouch</button>
+      <button data-m="use">Use</button>
+      <button data-m="kick">Kick</button>
+      <button data-m="reload">Reload</button>
+      <button data-m="nade">Throw</button>
+      <button data-m="cycle" class="m-cycle" aria-label="Next throwable">⟳</button>
+    </div>
+    <div id="m-emotes" class="m-sheet" hidden><div class="m-grid"></div></div>
+    <div id="m-drawer" class="m-sheet" hidden>
+      <div class="m-grid">
+        <button data-m="talk">Talk</button>
+        <button data-m="shove">Shove</button>
+        <button data-m="grab">Grab / Dual</button>
+        <button data-m="throw">Throw</button>
+        <button data-m="sit">Sit</button>
+        <button data-m="lie">Lie down</button>
+        <button data-m="ragdoll">Ragdoll</button>
+        <button data-m="cycle" id="m-cycle">Next throwable</button>
+        <button data-m="camera" id="m-camera">First person</button>
+        <button data-m="fullscreen" id="m-full">Fullscreen</button>
+        <button data-m="spawn" id="m-spawn">Spawn / FUN</button>
+        <button data-m="sandbox">Sandbox</button>
+        <button data-m="game-menu" class="m-wide">Menu &amp; settings</button>
+      </div>
+    </div>
+  </div>
+  <div id="prompt"></div>
+  <div id="dead"><b>R</b> Sandbox menu · click to respawn</div>
+  <div id="blood"><i></i><span></span></div>
+  <div id="menu">
+    <div class="panel">
+      <div class="col">
+        <button id="resume">Resume</button>
+        <button id="respawn">Respawn</button>
+        <button id="reset">Reset</button>
+        <button id="toMenu" data-level="menu">Back to menu</button>
+        <div id="levels">
+          <button data-level="baseplate">Baseplate</button>
+          <button data-level="room">Room</button>
+        </div>
+        <button id="mp" class="toggle">Multiplayer</button>
+        <button id="lobbyBtn" class="toggle">Lobbies</button>
+        <button id="setBtn" class="toggle">Settings</button>
+        <button id="donate" class="toggle">Donate</button>
+      </div>
+      <div id="settings" hidden></div>
+      <div id="lobbies" hidden></div>
+      <div id="donor" hidden>
+        <h3>Custom characters</h3>
+        <div id="tiers">
+          <button data-c="0"><b>Free</b><span>Your first character</span></button>
+          <button data-c="100"><b>100</b><span>Each character after that</span></button>
+          <button data-c="500"><b>500</b><span>Custom weapons (up to 5)</span></button>
+          <button data-c="1000"><b>1,000</b><span>Whatever you want</span></button>
+          <label class="more"><input id="tipAmt" type="number" min="1001" max="10000" step="100" placeholder="1,000+"><span>Custom abilities and powers</span></label>
+        </div>
+        <p class="cap">Please don't donate more than 10,000 credits - it's not necessary!</p>
+        <textarea id="wish" maxlength="600" rows="5" placeholder="Describe your character and the colour of your blood…"></textarea>
+        <button id="tip">Send request</button>
+        <p id="donorMsg"></p>
+        <button id="donorNotify" hidden>Notify me when my character is ready</button>
+      </div>
+      <div id="controls">
+      <h3>On foot</h3>
+      <dl>
+        <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move</dd>
+        <dt><kbd>Shift</kbd></dt><dd>Run</dd>
+        <dt><kbd>Space</kbd></dt><dd>Jump / climb / vault</dd>
+        <dt><kbd>C</kbd></dt><dd>Crouch (by a seat: sit)</dd>
+        <dt><kbd>Z</kbd></dt><dd>Grab / put down someone (hold to rip in half)</dd>
+        <dt><kbd>G</kbd></dt><dd>Ragdoll (spam to tumble)</dd>
+        <dt><kbd>E</kbd></dt><dd>Pick up / drop / buy / try on clothes / get in a car</dd>
+        <dt><kbd>T</kbd></dt><dd>Talk</dd>
+        <dt><kbd>Enter</kbd></dt><dd>Chat with nearby NPCs, or send a message</dd>
+        <dt><kbd>R</kbd></dt><dd>Sandbox menu</dd>
+        <dt><kbd>Hold H</kbd></dt><dd>Emote wheel (move the mouse, let go to pick)</dd>
+        <dt><kbd>Scroll</kbd></dt><dd>Zoom</dd>
+        <dt><kbd>~</kbd></dt><dd>Spawn menu / FUN menu (baseplate)</dd>
+      </dl>
+      <h3>Fighting</h3>
+      <dl>
+        <dt><kbd>Click</kbd></dt><dd>Punch / swing / shoot / throw</dd>
+        <dt><kbd>Hold click</kbd></dt><dd>Wind up a punch / overhead chop (release to throw it)</dd>
+        <dt><kbd>Right mouse</kbd></dt><dd>Aim over the shoulder</dd>
+        <dt><kbd>P</kbd> <kbd>P</kbd></dt><dd>First person</dd>
+        <dt><kbd>T</kbd> <kbd>T</kbd></dt><dd>Throw your weapon</dd>
+        <dt><kbd>E</kbd> <kbd>E</kbd></dt><dd>Second one-handed weapon / pick up a loose body part</dd>
+        <dt><kbd>F</kbd></dt><dd>Shove (or double-click)</dd>
+        <dt><kbd>Q</kbd></dt><dd>Throw a grabbed person / hold to aim a throwable (release to throw)</dd>
+        <dt><kbd>V</kbd></dt><dd>Switch throwable</dd>
+        <dt><kbd>M</kbd> <kbd>N</kbd></dt><dd>Bandage / tourniquet (you, or who you're looking at)</dd>
+        <dt><kbd>Hold K</kbd> <kbd>K</kbd></dt><dd>Tie someone up / take or drop their rope (hold on a tied person to untie)</dd>
+        <dt><kbd>B</kbd></dt><dd>Shop (survival, between waves)</dd>
+        <dt><kbd>X</kbd></dt><dd>Kick (stamp on the fallen)</dd>
+        <dt><kbd>L</kbd></dt><dd>Reload</dd>
+        <dt><kbd>1–5</kbd></dt><dd>Select hotbar weapon</dd>
+        <dt><kbd>Y</kbd></dt><dd>Accept a lobby invite</dd>
+        <dt><kbd>Hold I</kbd></dt><dd>Queen Bee: pull out / put back the stinger (click to sting)</dd>
+        <dt><kbd>U</kbd> <kbd>U</kbd></dt><dd>Queen Bee: lunge</dd>
+        <dt><kbd>Hold Space</kbd></dt><dd>Super jump (special skins)</dd>
+      </dl>
+      <h3>In a car</h3>
+      <dl>
+        <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Drive</dd>
+        <dt><kbd>Space</kbd></dt><dd>Handbrake</dd>
+        <dt><kbd>E</kbd></dt><dd>Get out</dd>
+      </dl>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

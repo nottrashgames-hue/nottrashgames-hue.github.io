@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.toastuh.bloodline.vr",
+    "sha256_cert_fingerprints": [
+      "4D:8C:01:7C:EA:A1:66:01:E7:6F:B6:E8:8D:28:BD:5A:61:13:ED:DC:F1:A4:74:62:08:87:45:C8:35:57:D2:AA"
+    ]
+  }
+}]
