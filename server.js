@@ -460,11 +460,11 @@ export default {
       const userId = request.headers.get('x-websim-user-id');
       if (!userId) return Response.json({ error: 'signed out' }, { status: 401 });
       if (request.method === 'GET') {
-        const row = await env.DB.prepare('SELECT cash, look FROM profiles WHERE user_id = ?').bind(userId).first();
+        const row = await env.DB.prepare('SELECT cash, look, updated FROM profiles WHERE user_id = ?').bind(userId).first();
         if (!row) return Response.json({ found: false });
         let look = null;
         try { look = row.look ? JSON.parse(row.look) : null; } catch { /* bad row */ }
-        return Response.json({ found: true, cash: row.cash, look });
+        return Response.json({ found: true, cash: row.cash, look, updated: row.updated || 0 });
       }
       if (request.method === 'POST') {
         let body;

@@ -40,7 +40,7 @@ import { Dismember } from './slice.js';
 import { Kick } from './kick.js';
 import { engineLoop } from './sfx.js';
 import { Multiplayer } from './mp.js';
-import { loadProfile, saveProfile, localLook } from './profile.js';
+import { loadProfile, saveProfile, localLook, localLookTime } from './profile.js';
 import { Wardrobe, sanitizeLook } from './wardrobe.js';
 import { specialLook, specialSkins, SPECIAL_NAMES, BALDI, wearSpecial } from './special.js';
 import { initDonor } from './donor.js';
@@ -53,6 +53,7 @@ import { Police, copLook, capMesh } from './police.js';
 import { buildTower } from './tower.js';
 import { buildArena, buildObby, buildMenuRoom, buildRoom } from './sandbox-maps.js';
 import { MenuBoard } from './mainmenu.js';
+import { DressingBooth } from './booth.js';
 import { Loading } from './loading.js';
 import { SandboxMenu } from './sandbox-menu.js';
 import { SpawnMenu } from './spawn.js';
@@ -868,6 +869,12 @@ money.onChange = (v) => saveProfile(v, myLook());
 loadProfile().then((p) => {
   if (!p) return;
   if (p.fresh) { saveProfile(money.amount, myLook()); return; }
+  // (this device's outfit is newer than the account's - saved since: it stays, and goes up)
+  if (p.look && localLook() && localLookTime() >= (p.updated || 0)) {
+    money.set(p.cash);
+    saveProfile(money.amount, myLook());
+    return;
+  }
   if (p.look) {
     // a body shaped elsewhere (another device) and never here yet: build that one
     const L = sanitizeLook(p.look), mine = localLook();
@@ -1070,6 +1077,7 @@ function createSandboxNpc(kind, prompt = '', sex = null, at = null, yaw = camYaw
   actor.hero.reset(p, yaw);
   const npc = new Npc(actor, p.clone(), social);
   npc.aiType = kind;
+  npc.spawned = true; // (put there from the spawn menu: gone again on a reset)
   npc.displayName = ({ 'dummy-ai': 'Dummy AI', dummy: 'Dummy', enemy: 'Enemy AI', 'strong-enemy': 'Stronger Enemy AI', custom: 'Custom AI', crook: 'Armed Person', cop: 'Police Officer', zombie: 'Zombie', person: 'Human', baldi: 'Baldi', papyrus: 'Papyrus' })[kind] || (kind.startsWith('@') ? kind.slice(1) : 'Human');
   npc.displayName += ' ' + (++npcLabelCount);
   npc.chatAllowed = !['dummy', 'enemy', 'strong-enemy', 'crook', 'cop', 'zombie'].includes(kind);
@@ -1597,6 +1605,13 @@ function resetWorld(fresh = true) {
   bought.length = 0;
   for (const animal of animals) animal.remove();
   animals.length = 0;
+  // everyone you spawned goes (the map's own people are put back below)
+  for (const n of npcs.filter((n) => n.spawned && !n.actor.remote)) {
+    dropNpc(n);
+    npcs.splice(npcs.indexOf(n), 1);
+    const d = drivers.indexOf(n);
+    if (d >= 0) drivers.splice(d, 1);
+  }
   // (in multiplayer the people and cars are the host's to put back)
   if (mp.isHost) {
     for (const n of npcs) { n.reset(); n.cashDropped = false; }
@@ -1612,8 +1627,8 @@ function resetWorld(fresh = true) {
   shots.clear();
   // every body back to its built shape, whoever's it is (dents: bats, bars, falls)
   for (const a of actors) undentTree(a.hero.root);
-  // back in as somebody else: a random face, hair and outfit (not on a map switch)
-  if (fresh && !hero.hero.look.fixed) { hero.hero.restyle(makeLook(hero.hero.look.sex)); shareLook(); }
+  // (your own outfit stays on: whatever you put on is kept through every reset and map)
+  if (fresh) { hero.hero.restyle(myLook()); saveProfile(money.amount, myLook()); }
   respawn();
   scatterLitter();
 }
@@ -2450,7 +2465,7 @@ function tossCash() {
 
 // ---- the survival shop: between waves, B ----
 let svShopping = false;
-const SHOP_NAMES = { bat: 'Baseball Bat', fireaxe: 'Fire Axe', longsword: 'Longsword', sledge: 'Sledgehammer', knife: 'Hunting Knife' };
+const SHOP_NAMES = { bat: 'Baseball Bat', fireaxe: 'Fire Axe', longsword: 'Longsword', sledge: 'Sledgehammer', knife: 'Hunting Knife', pencil: 'Pencil' };
 const svShop = survival ? new SvShop({
   names: (k) => SHOP_NAMES[k] || GUNS[k]?.name || THROWABLES[k]?.name || k[0].toUpperCase() + k.slice(1),
   money: () => money.amount,
@@ -2877,6 +2892,7 @@ function dropNpc(n) {
   a.hero.reset(SV_HIDE, 0);
   a.hero.setVisible(false);
   a.proxy?.setEnabled(false);
+  blood.removeActor(a); // (their wounds, drips, coughing and vomiting stop with them)
   removeActor(a);
   bubbles.live.get(a)?.el.remove();
   bubbles.live.delete(a);
@@ -2893,9 +2909,11 @@ function loadLevel(name) {
   // everyone and everything of the old map goes
   for (const n of [...npcs]) dropNpc(n);
   npcs.length = 0;
+  drivers.length = 0; // (gone with the map: never seated again)
   for (const p of [...props.list]) props.remove(p);
   for (const o of levelObjs) { o.removeFromParent(); disposeTree(o); }
   if (menuBoard) { menuBoard.mesh.visible = false; menuBoard.laser.visible = false; }
+  if (booth) booth.visible = false;
   // the new one
   const before = new Set(scene.children);
   const L = LEVELS[name](scene, renderer);
@@ -2938,6 +2956,8 @@ function loadLevel(name) {
   if (IN_MENU) {
     if (!menuBoard && L.menuBoard) menuBoard = new MenuBoard(scene, L.menuBoard, MAP_BOARD, goMap);
     if (menuBoard) menuBoard.mesh.visible = true;
+    if (!booth && L.booth) booth = makeBooth(L.booth);
+    if (booth) booth.visible = true;
   }
   // its people
   spawnCitizens(Array.from({ length: L.npcs ?? 0 }, () => makeLook()));
@@ -2961,12 +2981,25 @@ function loadLevel(name) {
 }
 const MAP_BOARD = [{ id: 'baseplate', name: 'Baseplate' }, { id: 'room', name: 'Room' }];
 let menuBoard = level.menuBoard ? new MenuBoard(scene, level.menuBoard, MAP_BOARD, goMap) : null;
-const menuDummy = () => { if (level.dummyAt) createSandboxNpc('dummy', '', 'm', level.dummyAt.clone(), Math.atan2(SPAWN.x - level.dummyAt.x, SPAWN.z - level.dummyAt.z)); };
+// the dressing booth by it: every pick worn at once, saved and shown to everyone
+const makeBooth = (spot) => new DressingBooth(scene, spot, () => hero.hero, () => {
+  sfx('pickup', 0.25);
+  const L = myLook();
+  for (const k in L) if (!SHAPE_KEYS.includes(k)) ownLook[k] = L[k];
+  saveProfile(money.amount, L);
+  shareLook();
+});
+let booth = level.booth ? makeBooth(level.booth) : null;
+const menuDummy = () => {
+  if (!level.dummyAt) return;
+  const n = createSandboxNpc('dummy', '', 'm', level.dummyAt.clone(), Math.atan2(SPAWN.x - level.dummyAt.x, SPAWN.z - level.dummyAt.z));
+  if (n) n.spawned = false; // (the menu room's own dummy stays)
+};
 menuDummy();
 {
   addEventListener('mousedown', (e) => {
     if (!IN_MENU || !menuBoard || mobile || e.button !== 0 || document.pointerLockElement !== canvas || paused || sandboxOpen) return;
-    if (menuBoard.click()) { e.preventDefault(); e.stopImmediatePropagation(); }
+    if (menuBoard.click() || booth?.click()) { e.preventDefault(); e.stopImmediatePropagation(); }
   }, true);
   // (a tap, not a look-drag)
   let tapAt = null;
@@ -2974,7 +3007,7 @@ menuDummy();
   canvas.addEventListener('pointerup', (e) => {
     if (!tapAt || paused || sandboxOpen || !IN_MENU || !menuBoard) return;
     const [x, y, t] = tapAt; tapAt = null;
-    if (Math.hypot(e.clientX - x, e.clientY - y) < 14 && performance.now() - t < 350) menuBoard.tap(camera, e.clientX, e.clientY);
+    if (Math.hypot(e.clientX - x, e.clientY - y) < 14 && performance.now() - t < 350) { if (!menuBoard.tap(camera, e.clientX, e.clientY)) booth?.tap(camera, e.clientX, e.clientY); }
   });
 }
 
@@ -3042,7 +3075,7 @@ function frame() {
   venomTick(actors, dt, hero, venomEl);
   nades.update(dt);
   level.update?.(dt);
-  if (IN_MENU) menuBoard?.update(camera, vr);
+  if (IN_MENU) { menuBoard?.update(camera, vr); booth?.update(camera, vr); }
   loading.update(realDt);
   updateSocial(dt);
   // knocked out of a seat: it's free again
@@ -3119,6 +3152,8 @@ function frame() {
   bloodView.far = vr.on ? 25 : 45;
   blood.floor.uploads = vr.on ? 2 : 6;
   blood.floor.upRate = vr.on ? 1 / 12 : 1 / 30;
+  blood.floor.maxShown = vr.on ? 8 : Infinity;
+  blood.floor.ppm = vr.on ? 40 : 64;
   blood.update(dt);
   debris.update(dt, focusPos());
   litter.update(dt);
@@ -3165,7 +3200,6 @@ function frame() {
   store?.update(hero.hero.pos, hero.mode === 'anim' && !hero.seat, money.amount);
   carPrompt();
   mp.post(dt);
-
   const car = hero.seat?.car;
   const p = car ? car.p : hero.focus();
   if (vr.on) { knifeTick(); vr.frame(); } else {
@@ -3246,7 +3280,6 @@ function frame() {
       bloodTxt.textContent = `${O.volume.toFixed(1)} L`;
     }
   }
-
   sun.position.set(p.x + SUN_OFF.x, SUN_OFF.y, p.z + SUN_OFF.z);
   sun.target.position.set(p.x, 0, p.z);
   cullPeople();

@@ -24,6 +24,19 @@ export class MenuBoard {
     const frame = new THREE.Mesh(new THREE.BoxGeometry(PW + 0.16, PH + 0.16, 0.06), new THREE.MeshStandardMaterial({ color: 0x3b2c22, roughness: 0.7 }));
     frame.position.set(0, 0, -0.04);
     this.mesh.add(frame);
+    // the logo on the wall over the board
+    const logo = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ transparent: true, alphaTest: 0.05, toneMapped: false }));
+    new THREE.TextureLoader().load('menulogo.png', (t) => {
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = 4;
+      logo.material.map = t; logo.material.needsUpdate = true;
+      const h = 1.15, w = h * t.image.width / t.image.height;
+      logo.scale.set(w, h, 1);
+      logo.position.set(0, PH / 2 + 0.16 + h / 2, 0);
+      logo.visible = true;
+    });
+    logo.visible = false; // (till the picture's in)
+    this.mesh.add(logo);
     scene.add(this.mesh);
     // every map the same size, side by side (up to 3 to a row), centred under the title
     const P = 48, G = 32, per = Math.min(3, maps.length), rows = Math.ceil(maps.length / per);

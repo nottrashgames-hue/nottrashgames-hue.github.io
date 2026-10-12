@@ -41,6 +41,52 @@ const GALAXY_DROPS = [0x4a1a8c, 0x2a1570, 0x1d3a9a, 0x6a1f9e, 0xb0307a].map((h) 
 const galaxyDrop = () => GALAXY_DROPS[(Math.random() * GALAXY_DROPS.length) | 0].clone();
 const dropCol = (ink) => (ink === RAINBOW ? rainbowDrop() : ink === PRISM ? prismDrop(prismHue()) : ink === GALAXY ? galaxyDrop() : null);
 
+
+/** The airborne drops: a Points cloud of round sprites, sized in metres (each drop its own). */
+function dropSprites() {
+  const g = new THREE.BufferGeometry();
+  const mk = (k) => new THREE.BufferAttribute(new Float32Array(MAX * k), k).setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute('position', mk(3));
+  g.setAttribute('color', mk(3));
+  g.setAttribute('size', mk(1));
+  g.setDrawRange(0, 0);
+  const uni = { uScale: { value: 500 } };
+  const mat = new THREE.ShaderMaterial({
+    uniforms: uni,
+    vertexShader: `
+      attribute float size;
+      attribute vec3 color;
+      uniform float uScale;
+      varying vec3 vCol;
+      void main() {
+        vCol = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        // metres -> pixels at this distance (never under ~1.5 px: far drops still read)
+        gl_PointSize = max(1.5, size * projectionMatrix[1][1] * uScale / -mv.z);
+      }`,
+    fragmentShader: `
+      varying vec3 vCol;
+      void main() {
+        vec2 q = gl_PointCoord * 2.0 - 1.0;
+        float d = dot(q, q);
+        if (d > 1.0) discard;
+        // darker at the rim, a small glint up and to the left
+        vec3 c = vCol * (1.0 - 0.35 * d);
+        c += vec3(0.5) * smoothstep(0.12, 0.0, dot(q - vec2(-0.35, -0.35), q - vec2(-0.35, -0.35)));
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false;
+  pts.visible = false;
+  // half the viewport's height in pixels (per eye in a headset): what turns metres into point size
+  const vp = new THREE.Vector4();
+  pts.onBeforeRender = (renderer) => { renderer.getCurrentViewport(vp); uni.uScale.value = vp.w / 2; };
+  return pts;
+}
+
 export class BloodSystem {
   constructor(scene, colliders) {
     this.scene = scene;
@@ -48,17 +94,11 @@ export class BloodSystem {
     this.floor = new BloodSurfaces(scene, colliders);
     this.arteries = new Arteries(this);
     this.people = [];
-    const geo = new THREE.SphereGeometry(1, 7, 5); // (drops are tiny and stretched: a few faces is plenty, and there can be 1400 of them)
-    // (white: each drop's own colour comes from its instance colour, its ink)
-    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.08, metalness: 0 });
-    this.mesh = new THREE.InstancedMesh(geo, mat, MAX);
-    this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX * 3), 3);
-    this.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    // drops in the air: flat 2D sprites (one point each, a round drop with a glint) - no geometry,
+    // no lighting, one draw for all of them
+    this.mesh = dropSprites();
     // Which blood the next spray / drip is: an ink index, 0 red (see inked). Read once, then red again.
     this.ink = 0;
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.count = 0;
-    this.mesh.frustumCulled = false;
     scene.add(this.mesh);
     this.p = []; // { pos, vel, r, age }
     this.cars = null; // set by main: every car, for drops landing on them
@@ -110,6 +150,16 @@ export class BloodSystem {
     return w;
   }
 
+  /** Someone gone from the world (a map switch): no more bleeding, dripping, coughing or throwing up. */
+  removeActor(actor) {
+    const i = this.people.findIndex((w) => w.actor === actor);
+    if (i >= 0) this.people.splice(i, 1);
+    const W = actor.wounds;
+    if (W) { try { W.heal(); } catch (e) { /* half-built */ } }
+    try { actor.organs?.heal?.(); } catch (e) { /* (nothing to heal) */ }
+    if (this.caps) this.caps = this.caps.filter((B) => B.A !== actor);
+  }
+
   /** The next spray / drip (only that one) is this actor's blood colour. */
   inked(who) {
     this.ink = inkOf(who);
@@ -137,7 +187,7 @@ export class BloodSystem {
     const ink = this.takeInk();
     if (!settings.blood || !settings.bloodSpray || !(settings.bloodAmount > 0) || noInk(ink)) return;
     if (this.p.length >= MAX) this.p.shift();
-    this.p.push({ pos: at.clone(), vel: vel.clone(), r, age: 0, heavy: true, ink, col: dropCol(ink), hue: ink === PRISM ? prismHue() : null });
+    this.p.push({ pos: at.clone(), vel: vel.clone(), r, age: 0, heavy: true, src: this.srcNow, ink, col: dropCol(ink), hue: ink === PRISM ? prismHue() : null });
   }
 
   /**
@@ -182,7 +232,8 @@ export class BloodSystem {
   /** Airborne drops and every stain in the world gone. */
   clear() {
     this.p.length = 0;
-    this.mesh.count = 0;
+    this.mesh.geometry.setDrawRange(0, 0);
+    this.mesh.visible = false;
     this.floor.clear();
     this.arteries.clear();
   }
@@ -231,7 +282,7 @@ export class BloodSystem {
       const hit = this.floor.hitBox(prev, p.pos);
       if (hit) {
         this.landed(p, hit.point);
-        this.floor.ink = p.ink;
+        this.floor.ink = p.ink; this.floor.by(p.src);
         if (p.hue != null) setPrismHue(p.hue);
         if (p.heavy && p.r < 0.006) this.floor.drop(hit.surf, hit.point, p.vel, p.r);
         else this.floor.splat(hit.surf, hit.point, p.vel, size, p.heavy ? 0.9 : 0.6);
@@ -241,7 +292,7 @@ export class BloodSystem {
         p.pos.y = 0;
         this.landed(p, p.pos);
         const S = this.floor.floorTile(p.pos.x, p.pos.z);
-        this.floor.ink = p.ink;
+        this.floor.ink = p.ink; this.floor.by(p.src);
         if (p.hue != null) setPrismHue(p.hue);
         if (p.heavy && p.r < 0.006) this.floor.drop(S, p.pos, p.vel, p.r);
         else this.floor.splat(S, p.pos, p.vel, size, p.heavy ? 0.9 : 0.6);
@@ -253,27 +304,20 @@ export class BloodSystem {
     P.length = n;
     this.splatSound(dt);
 
-    // draw: stretched along velocity
-    const M = this.mesh;
+    // draw: one sprite per drop, a little bigger the faster it's going (motion blur, cheaply)
+    const M = this.mesh, pos = M.geometry.attributes.position, col = M.geometry.attributes.color, sz = M.geometry.attributes.size;
     for (let i = 0; i < n; i++) {
       const p = P[i];
-      const sp = p.vel.length();
-      _d.copy(p.vel).divideScalar(Math.max(sp, 1e-4));
-      _q.setFromUnitVectors(UPY, _d);
-      const st = 1 + Math.min(4, sp * 0.12);
-      _s.set(p.r, p.r * st, p.r);
-      M.setMatrixAt(i, _m.compose(p.pos, _q, _s));
-      M.setColorAt(i, p.col || DROP[p.ink] || DROP[0]);
+      pos.setXYZ(i, p.pos.x, p.pos.y, p.pos.z);
+      const c = p.col || DROP[p.ink] || DROP[0];
+      col.setXYZ(i, c.r, c.g, c.b);
+      sz.setX(i, p.r * (2 + Math.min(2.5, p.vel.length() * 0.12)));
     }
-    if (n) { // only the live drops' matrices go to the GPU; nothing in the air: nothing to upload
-      M.instanceMatrix.clearUpdateRanges();
-      M.instanceMatrix.addUpdateRange(0, n * 16);
-      M.instanceMatrix.needsUpdate = true;
-      M.instanceColor.clearUpdateRanges();
-      M.instanceColor.addUpdateRange(0, n * 3);
-      M.instanceColor.needsUpdate = true;
+    if (n) { // only the live drops go to the GPU; nothing in the air: nothing to upload
+      for (const [a, k] of [[pos, 3], [col, 3], [sz, 1]]) { a.clearUpdateRanges(); a.addUpdateRange(0, n * k); a.needsUpdate = true; }
     }
-    M.count = n;
+    M.geometry.setDrawRange(0, n);
+    M.visible = n > 0;
     this.floor.update(dt);
   }
 }

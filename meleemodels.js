@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /*
   Melee weapon meshes. Every weapon's frame: origin at the centre of the (right) hand's grip,
@@ -383,6 +384,35 @@ export function buildHandSaw() {
     const b = mesh(new THREE.CylinderGeometry(0.005, 0.005, 0.008, 10), brass, g);
     b.rotation.z = Math.PI / 2;
     b.position.set(0, y, z);
+  }
+  return g;
+}
+
+/*
+  Pencil (PENCIL.glb): loaded once up front, every pencil a copy with its own materials (each
+  weapon's blood is drawn into its own). The model is ~1.9 units long, eraser down, point up
+  (+Y): scaled to a real pencil (~19 cm), the grip a third of the way up from the eraser.
+*/
+let PENCIL_SRC = null;
+try { PENCIL_SRC = (await new GLTFLoader().loadAsync('PENCIL.glb')).scene; } catch (e) { console.warn('PENCIL.glb failed to load', e); }
+export function buildPencil() {
+  const g = new THREE.Group();
+  if (PENCIL_SRC) {
+    const m = PENCIL_SRC.clone(true);
+    m.scale.setScalar(0.1);
+    m.position.y = -0.036;
+    m.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = o.material.clone();
+      o.castShadow = o.receiveShadow = true;
+    });
+    g.add(m);
+  } else {
+    // (no model: a plain yellow stick with a dark point)
+    const b = mesh(new THREE.CylinderGeometry(0.0045, 0.0045, 0.17, 6), new THREE.MeshStandardMaterial({ color: 0xe0a020, roughness: 0.5 }), g);
+    b.position.y = 0.025;
+    const t = mesh(new THREE.ConeGeometry(0.0045, 0.022, 6), new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.5 }), g);
+    t.position.y = 0.121;
   }
   return g;
 }

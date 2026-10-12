@@ -362,7 +362,8 @@ export class Ragdoll {
   /** Push the whole body out of any static geometry it was placed overlapping. */
   depenetrate() {
     const w = this.world;
-    if (!this.statics) {
+    if (!this.statics || this.staticGen !== (w._staticGen || 0) || !w._staticBounds) {
+      this.staticGen = w._staticGen || 0;
       // the level's fixed colliders, each with a bounding sphere (shared by every ragdoll)
       this.statics = w._staticBounds ||= (() => {
         const out = [];
@@ -382,6 +383,7 @@ export class Ragdoll {
     const pel = this.parts.pelvis.body.translation();
     const near = [];
     for (const s of this.statics) {
+      if (!w.getCollider(s.c.handle)) continue; // (removed: a map switch)
       const d = Math.hypot(s.x - pel.x, s.y - pel.y, s.z - pel.z);
       if (!(d > s.rad + 3)) near.push(s.c);
     }

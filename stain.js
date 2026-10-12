@@ -196,6 +196,69 @@ export class StainVol {
     this.foDirty = true;
   }
 
+  /**
+   * Rubbed against the ground: blood (film, soak, someone else's) comes off within radius r of
+   * volume point p - wet or dried, a little more each rub, so a body dragged along long enough
+   * ends up clean there. amt: 0..1 of a full stain taken per call. Wounds and bruises stay.
+   */
+  wipe(p, r, amt) {
+    if (!(amt > 0)) return;
+    if (this.data) {
+      const v = this.vox, D = this.data, nx = this.nx, ny = this.ny;
+      r = Math.max(r, v * 0.9);
+      const x0 = Math.max(0, Math.floor((p.x - r - this.min.x) / v)), x1 = Math.min(nx - 1, Math.floor((p.x + r - this.min.x) / v));
+      const y0 = Math.max(0, Math.floor((p.y - r - this.min.y) / v)), y1 = Math.min(ny - 1, Math.floor((p.y + r - this.min.y) / v));
+      const z0 = Math.max(0, Math.floor((p.z - r - this.min.z) / v)), z1 = Math.min(this.nz - 1, Math.floor((p.z + r - this.min.z) / v));
+      const r2 = r * r, a = amt * 255;
+      let hit = false;
+      for (let z = z0; z <= z1; z++) {
+        const dz = this.min.z + (z + 0.5) * v - p.z;
+        for (let y = y0; y <= y1; y++) {
+          const dy = this.min.y + (y + 0.5) * v - p.y;
+          let i = ((z * ny + y) * nx + x0) * 4;
+          for (let x = x0; x <= x1; x++, i += 4) {
+            if (!D[i] && !D[i + 3]) continue;
+            const dx = this.min.x + (x + 0.5) * v - p.x;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 >= r2) continue;
+            const k = a * (1 - d2 / r2) + 1;
+            D[i] = D[i] > k ? D[i] - k : 0;
+            D[i + 3] = D[i + 3] > k ? D[i + 3] - k : 0;
+            hit = true;
+          }
+        }
+      }
+      if (hit) this.dirty = true;
+    }
+    if (this.fo) {
+      const [vx, vy, vz] = this.fvox, D = this.fo, nx = this.fx, ny = this.fy, nz = this.fz;
+      const R = Math.max(r, Math.max(vx, vy, vz) * 0.9), r2 = R * R, a = amt * 255;
+      const x0 = Math.max(0, Math.floor((p.x - R - this.min.x) / vx)), x1 = Math.min(nx - 1, Math.floor((p.x + R - this.min.x) / vx));
+      const y0 = Math.max(0, Math.floor((p.y - R - this.min.y) / vy)), y1 = Math.min(ny - 1, Math.floor((p.y + R - this.min.y) / vy));
+      const z0 = Math.max(0, Math.floor((p.z - R - this.min.z) / vz)), z1 = Math.min(nz - 1, Math.floor((p.z + R - this.min.z) / vz));
+      let hit = false;
+      for (let z = z0; z <= z1; z++) {
+        const dz = this.min.z + (z + 0.5) * vz - p.z;
+        for (let y = y0; y <= y1; y++) {
+          const dy = this.min.y + (y + 0.5) * vy - p.y;
+          let i = ((z * ny + y) * nx + x0) * 4;
+          for (let x = x0; x <= x1; x++, i += 4) {
+            const al = D[i + 3];
+            if (!al) continue;
+            const dx = this.min.x + (x + 0.5) * vx - p.x;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 >= r2) continue;
+            // (premultiplied: the colour thins with the thickness)
+            const na = Math.max(0, al - (a * (1 - d2 / r2) + 1)), s = na / al;
+            D[i] *= s; D[i + 1] *= s; D[i + 2] *= s; D[i + 3] = na;
+            hit = true;
+          }
+        }
+      }
+      if (hit) this.foDirty = true;
+    }
+  }
+
   /** A line of brush dabs from a to b (volume space). */
   line(a, b, r, ch, amt) {
     r = Math.max(r, this.vox * 0.9);
@@ -304,6 +367,9 @@ export class StainVol {
 /** Swap a mesh's material for a stainable clone reading `vol` (ink: the body's blood colour, inks.js). */
 export function stainMaterial(base, vol, cloth, ink = 0) {
   const mat = base.clone();
+  // (the same Color as the base: the wardrobe, the FUN menu and pallor recolour M.top / M.skin...
+  // and every stained copy of it follows)
+  mat.color = base.color;
   // (psy.js: a living fractal skin, hue offset userData.psy; rainbow blood, inks.js)
   const psy = typeof base.userData.psy === 'number' ? base.userData.psy : null;
   const rain = ink === RAINBOW, prism = ink === PRISM, fx = inkFx(ink);

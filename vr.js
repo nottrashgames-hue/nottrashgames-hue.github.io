@@ -1,10 +1,12 @@
 import * as THREE from 'three';
-import { poseArm } from './gun.js';
+import { SCHEMA, settings, setSetting } from './settings.js';
+import { poseArm as solveArm } from './gun.js';
 import { GRIP_TILT } from './gunmodel.js';
 import { curl, armUp } from './melee.js';
 import { sweep, partNear } from './strike.js';
 import { pullPart } from './grabbing.js';
 import { sawStep } from './saw.js';
+import { chopPush } from './chop.js';
 
 /*
   WebXR: your head is the camera, your controllers drive the body's arms (two-bone IK onto the
@@ -25,6 +27,24 @@ const GUN_GRIP_L = frame(V(1, 0, 0), V(0, gs, -gc), V(0, gc, gs), V(0.03, -0.022
 const MELEE_ON = frame(V(1, 0, 0), V(0, 0, -1), V(0, 1, 0), V(-0.03, 0, -0.072));
 // where the palm sits on a gun, in the gun's frame: that's what goes on the controller's grip
 const GUN_PALM = V(-0.015, -0.05, -0.025);
+/*
+  The wrist frames above are for a body of standard size; a body sized to you (height
+  calibration, or bigger hands) has its wrist further from (or nearer to) the fist, so the
+  offsets grow with the hand: else whatever's held sits off in the fingers or up the wrist.
+*/
+const handK = (h) => (h.S || 1) * (h.look?.handSize ?? 1);
+const _sized = new Map();
+function sized(M, h) {
+  const k = handK(h);
+  if (Math.abs(k - 1) < 1e-3) return M;
+  let c = _sized.get(M);
+  if (!c || c.k !== k) {
+    c = M.clone(); c.k = k;
+    c.elements[12] *= k; c.elements[13] *= k; c.elements[14] *= k;
+    _sized.set(M, c);
+  }
+  return c;
+}
 // a held melee weapon: shaft up out of the fist, leaning forward
 const MT = 0.75, mc = Math.cos(MT), ms = Math.sin(MT);
 const MELEE_ROT = Q().setFromRotationMatrix(new THREE.Matrix4().makeBasis(V(-1, 0, 0), V(0, mc, -ms), V(0, -ms, -mc)));
@@ -33,8 +53,46 @@ const LEAN = 0.22;        // m the head can lean out from over the body before t
 const TURN = Math.PI / 6; // snap turn
 const BODY_LAYER = 3;     // your own torso, neck and head: in the shadow, never in your eyes
 const ARM = 1.32;         // the arms in VR: this much longer, so the hands reach the controllers
+
+/*
+  The arm onto the controller: the IK's arm (already ARM longer in VR) and, when the controller
+  is further from the shoulder than that, stretched further still for this arm alone - so the
+  hand (and whatever's in it) never comes off the wrist or drops short of where your hand is.
+*/
+const _sh = new THREE.Vector3();
+/**
+ * Stretch an arm's upper and forearm meshes along the bone by k (from their built length), and
+ * move the hand to the stretched wrist - the body's meshes don't recompose their own matrices
+ * (character.js), so each one is re-baked here: else the bones grew and the skin didn't (gaps).
+ */
+function stretchArm(a, k) {
+  for (const g of [a.upper, a.fore]) for (const c of g.children) {
+    if (c === a.hand) continue;
+    c.userData.vrSY ??= c.scale.y;
+    c.userData.vrPY ??= c.position.y;
+    c.scale.y = c.userData.vrSY * k;
+    c.position.y = c.userData.vrPY * k;
+    c.updateMatrix();
+  }
+  a.hand.userData.vrY ??= a.hand.position.y;
+  a.hand.position.y = a.hand.userData.vrY * k;
+  a.hand.updateMatrix();
+}
+function poseArm(h, a, pos, quat, pole) {
+  const D = h.D;
+  if (D._ua === undefined) return solveArm(h, a, pos, quat, pole);
+  h.chest.updateWorldMatrix(true, false);
+  h.chest.localToWorld(_sh.set(a.side * 0.185, 0.2, -0.015));
+  const full = (D._ua + D._fa) * ARM;
+  const k = ARM * Math.max(1, _sh.distanceTo(pos) / (full * 0.995));
+  a.userData_k = k;
+  stretchArm(a, k);
+  D.UPPER_ARM = D._ua * k; D.FOREARM = D._fa * k;
+  solveArm(h, a, pos, quat, pole);
+  D.UPPER_ARM = D._ua * ARM; D.FOREARM = D._fa * ARM;
+}
 const EYE = V(0, 0.09, 0.075); // between the eyes, in the head's frame (main.js firstPerson)
-const CROUCH = 0.45;      // m your real head drops for the body's full crouch
+const CROUCH = 0.26;      // m your real head drops for the body's full crouch (quick: a body taller than you still gets down)
 const PALM = V(0, -0.075, 0.01); // the middle of the palm, in the hand's frame
 const GRAB_R = 0.24;      // m from the palm to a body part's surface, to close on it (generous: easy to get hold of people)
 const GRAB_CHUNK = 0.22;  // m from the palm to a loose piece's middle
@@ -52,6 +110,7 @@ export const WHEEL_PAGES = [
   { name: 'MELEE', items: [
     { type: null, name: 'Hands' },
     { type: 'knife', name: 'Knife' },
+    { type: 'pencil', name: 'Pencil' },
     { type: 'bat', name: 'Bat' },
     { type: 'machete', name: 'Machete' },
     { type: 'saw', name: 'Saw' },
@@ -94,7 +153,9 @@ export class VRMode {
     this.held = { left: null, right: null }; // what each bare hand has hold of
     this.palm = { left: V(), right: V() };
     this.palmVel = { left: V(), right: V() };
-    this.floorLock = (() => { try { return localStorage.getItem('vrFloorLock') === '1'; } catch (e) { return false; } })();
+    // (Calibrate height: your real standing eye height, kept for next time)
+    this.calibY = (() => { try { return +localStorage.getItem('vrStandY') || 0; } catch (e) { return 0; } })();
+    this.dy0 = 0;              // rig height over the feet while you stand (crouching, it eases to 0)
     this.freeNow = { left: false, right: false };
     const xr = this.renderer.xr;
     xr.enabled = true;
@@ -165,7 +226,7 @@ export class VRMode {
     // (looking the way the body faces: the camera looks down -Z, the body down +Z)
     this.rigYaw = this.hero.hero.yaw + Math.PI;
     this.off.set(0, 0, 0);
-    this.dy = 0;
+    this.dy = this.dy0 = 0;
     this.recentre = 6;
     this.armLength(ARM);
     this.sun?.shadow.camera.layers.enable(BODY_LAYER);
@@ -201,37 +262,32 @@ export class VRMode {
   }
 
   /**
-   * Calibrate height (the menu): stand up straight and press it - the body is rebuilt your
-   * height (main.js resize), so its eyes are yours and its floor is your real floor: you can
-   * reach down and touch it. Kept for next time.
+   * Calibrate height (the menu): stand up straight and press it - the body keeps its own height,
+   * your eyes go to its eyes, and crouching for real takes it all the way down (the floor coming
+   * up to meet you as you go, so your hands reach the ground). Kept for next time.
    */
   calibrate() {
     if (this.camera.position.y < 0.5 || this.hero.mode !== 'anim') return; // (not tracking yet / lying down)
-    this.floorLock = true;
-    try { localStorage.setItem('vrFloorLock', '1'); } catch (e) { /* private mode */ }
     this.buzz('left', 0.5, 80); this.buzz('right', 0.5, 80);
-    // the body's eye height (standing) against yours: the body's height scaled to match
     const h = this.hero.hero, B = h.pos;
     h.head.updateWorldMatrix(true, false);
     const eye = _p.copy(EYE).applyMatrix4(h.head.matrixWorld).y - B.y;
-    const S = h.S || 1, want = Math.max(0.3, Math.min(2.6, S * this.camera.position.y / Math.max(0.3, eye)));
-    this.standY = this.camera.position.y;
-    this.dy = 0;
-    if (Math.abs(want - S) > 0.01) this.resize?.(Math.round(want * 1000) / 1000);
+    this.calibY = this.standY = this.camera.position.y;
+    this.dy = this.dy0 = eye + (h.dip || 0) * CROUCH - this.standY; // (as if the body stood straight)
+    try { localStorage.setItem('vrStandY', String(this.calibY)); localStorage.removeItem('vrFloorLock'); } catch (e) { /* private mode */ }
   }
 
   /** Stretch both arms by k: the bones the IK solves with and the meshes along them (not the hands). */
-  armLength(k) {
+  armLength(k0, keep = false) {
     const h = this.hero.hero, D = h.D;
     D._ua ??= D.UPPER_ARM; D._fa ??= D.FOREARM;
-    D.UPPER_ARM = D._ua * k; D.FOREARM = D._fa * k;
+    D.UPPER_ARM = D._ua * k0; D.FOREARM = D._fa * k0;
     for (const a of h.arms) {
-      for (const c of a.upper.children) c.scale.y = k;
-      for (const c of a.fore.children) if (c !== a.hand) c.scale.y = k;
-      // (in the forearm's own frame - already scaled with the body's height: D.FOREARM is in
-      // metres, so using it here scaled twice and a resized body's hands came off its wrists)
-      a.hand.userData.vrY ??= a.hand.position.y;
-      a.hand.position.y = a.hand.userData.vrY * k;
+      // keep: each arm as far as it's stretched this frame (poseArm: reaching past its length)
+      const k = keep && a.userData_k ? a.userData_k : k0;
+      a.userData_k = k;
+      // (in the forearm's own frame - already scaled with the body's height)
+      stretchArm(a, k);
     }
   }
 
@@ -358,9 +414,9 @@ export class VRMode {
       // (once, coming in: your height matched to the body's - standing or sitting, tall or short)
       this.recentre--;
       this.off.x -= dx; this.off.z -= dz;
-      // (calibrated: your real floor is the floor - else your eyes go where the body's are)
-      this.dy = this.floorLock ? 0 : E.y - B.y - this.camera.position.y;
-      this.standY = this.camera.position.y;
+      // (your eyes where the body's are: standing at your calibrated height, else as you are now)
+      this.standY = this.calibY || this.camera.position.y;
+      this.dy = this.dy0 = E.y - B.y - this.standY;
     } else if (d > LEAN) { const k = (d - LEAN) / d; this.off.x -= dx * k; this.off.z -= dz * k; }
     this.rig.position.set(B.x + this.off.x, B.y + this.dy, B.z + this.off.z);
     this.rig.updateMatrixWorld(true);
@@ -372,7 +428,7 @@ export class VRMode {
     this.place(h);
     h.head.visible = false;
     this.hideBody(true);
-    this.armLength(ARM); // (the wardrobe can rebuild sleeves: keep them stretched too)
+    this.armLength(ARM, true); // (the wardrobe can rebuild sleeves: keep them stretched too - as far as each arm reached)
     if (this.wheel?.visible) this.updateWheel();
     this.scopeTick();
     this.flightTick();
@@ -441,6 +497,7 @@ export class VRMode {
     // elbows down and out, a touch back
     const pole = (a) => _pole.copy(right).multiplyScalar(a.side > 0 ? -0.7 : 0.7).addScaledVector(UP, -0.8).addScaledVector(fwd, -0.25).normalize();
     const aR = h.arms[1], aL = h.arms[0];
+    aR.userData_k = aL.userData_k = ARM; // (stretched again below if the controller is out of reach)
     let leftDone = false;
     if (R?.grip.visible) {
       if (gun && gun.state === 'held') leftDone = this.holdGun(h, gun, R, L, aR, aL, pole, dt);
@@ -463,9 +520,12 @@ export class VRMode {
     const y = this.camera.position.y;
     if (y > this.standY) this.standY += (y - this.standY) * 0.05; // (stood up straighter)
     const drop = this.standY - y;
-    const k = Math.min(1, Math.max(0, (drop - 0.06) / CROUCH));
+    const k = Math.min(1, Math.max(0, (drop - 0.04) / CROUCH));
     h.dip = k < 0.03 ? 0 : k;
-    h.bend = Math.min(0.5, Math.max(0, (drop - CROUCH - 0.06) / 0.5));
+    h.bend = Math.min(0.5, Math.max(0, (drop - CROUCH - 0.04) / 0.35));
+    // the floor comes up to meet you: head down to ~45% of standing, your real floor is the floor
+    const t = Math.min(1, Math.max(0, drop / (this.standY * 0.55)));
+    this.dy = this.dy0 * (1 - t * t * (3 - 2 * t));
   }
 
   /** An empty hand on the controller: fingers close with grip / trigger. */
@@ -475,14 +535,14 @@ export class VRMode {
     _v.copy(GUN_PALM);
     if (hand === 'left') _v.x = -_v.x;
     _p.sub(_v.applyQuaternion(_q));
-    _m.compose(_p, _q, _s.set(1, 1, 1)).multiply(hand === 'left' ? GUN_GRIP_L : GUN_GRIP_R);
+    _m.compose(_p, _q, _s.set(1, 1, 1)).multiply(sized(hand === 'left' ? GUN_GRIP_L : GUN_GRIP_R, h));
     _m.decompose(_p, _q, _s);
     poseArm(h, a, _p, _q, pole(a));
     this.freeNow[hand] = true;
     // the palm, and how fast it's going (to throw with)
     const P = this.palm[hand], pv = this.palmVel[hand];
     const was = _w.copy(P);
-    P.copy(PALM).applyQuaternion(_q).add(_p);
+    P.copy(PALM).multiplyScalar(handK(h)).applyQuaternion(_q).add(_p);
     if (dt > 0) pv.lerp(was.sub(P).multiplyScalar(-1 / dt), 0.5);
     // squeeze: take hold of whatever the palm is on; let go to drop (or throw) it
     if (this.edge(hand, 1) && !this.held[hand] && !this.uiOpen()) this.grab(hand, h.arms.indexOf(a));
@@ -606,7 +666,7 @@ export class VRMode {
     if (M.long && L?.grip.visible && this.btnVal('left', 1) > 0.5) {
       const lp = V().setFromMatrixPosition(L.grip.matrixWorld);
       if (!this.twoHand) {
-        _m.compose(pos.clone().sub(GUN_PALM.clone().applyQuaternion(q)), q, _s.set(1, 1, 1)).multiply(M.leftGrip);
+        _m.compose(pos.clone().sub(GUN_PALM.clone().applyQuaternion(q)), q, _s.set(1, 1, 1)).multiply(sized(M.leftGrip, h));
         if (V().setFromMatrixPosition(_m).distanceTo(lp) < 0.22) this.twoHand = true;
       }
       if (this.twoHand) {
@@ -631,11 +691,11 @@ export class VRMode {
     if (gun.vel.length() > 30) gun.vel.set(0, 0, 0);
     gun.lastPos.copy(gun.mesh.position);
     const G = gun.mesh.matrixWorld;
-    _m.multiplyMatrices(G, GUN_GRIP_R).decompose(_p, _q, _s);
+    _m.multiplyMatrices(G, sized(GUN_GRIP_R, h)).decompose(_p, _q, _s);
     poseArm(h, aR, _p, _q, pole(aR));
     curl(aR, 1.35, 0.75 - this.btnVal('right', 0) * 0.3);
     if (two) {
-      _m.multiplyMatrices(G, M.leftGrip);
+      _m.multiplyMatrices(G, sized(M.leftGrip, h));
       if (M.pump && gun.slide) _m.multiply(_rx.makeTranslation(0, 0, gun.slide.position.z));
       _m.decompose(_p, _q, _s);
       poseArm(h, aL, _p, _q, pole(aL));
@@ -743,7 +803,17 @@ export class VRMode {
     const ctrl = V().setFromMatrixPosition(R.grip.matrixWorld);
     const inW = S.inL.clone().transformDirection(mesh.matrixWorld);
     const rel = ctrl.clone().sub(handle), push = rel.dot(inW), off = rel.addScaledVector(inW, -push).length();
-    if (off > 0.2) { this.ripOut(m); return; }
+    // (a machete wedged in its kerf: drawn along its length, the edge slices on - chop.js)
+    const K = S.chop;
+    let along = 0;
+    if (K) {
+      const ax = _w.set(0, 1, 0).transformDirection(mesh.matrixWorld);
+      const a = ctrl.dot(ax);
+      if (S.lastAlong != null) along = a - S.lastAlong;
+      S.lastAlong = a;
+      if (Math.abs(along) > 0.05) along = 0; // (a jump: tracking, not a stroke)
+    }
+    if (off > (K ? 0.28 : 0.2)) { this.ripOut(m); return; }
     // the grip of the flesh: a dead zone, then a lagging, speed-capped drag
     const GRIP = 0.008 + S.depth * 0.04;
     let dd = 0;
@@ -752,6 +822,18 @@ export class VRMode {
       const k = 1 - Math.exp(-dt * (push > 0 ? 9 : 12) / (1 + S.depth * 10));
       const cap = dt * (push > 0 ? 0.7 : 0.9);
       dd = Math.max(-cap, Math.min(cap, want * k));
+    }
+    // pushed on in, or drawn along: the kerf goes deeper - and through, the limb's off
+    if (K && (dd > 0 || along)) {
+      if (chopPush(m, K, Math.max(0, dd), along)) {
+        this.buzz('right', 1, 90);
+        m.unstick(true);
+        this.prevSeg = null;
+        return;
+      }
+      if (Math.abs(along) > 0.002) this.buzz('right', Math.min(1, 0.2 + Math.abs(along) / dt * 0.25), 25);
+      // the edge sinks as the kerf deepens
+      S.max = Math.max(S.max, Math.min(K.r * 2.05, K.k * K.r * 2 + 0.02));
     }
     if (dd > 0 && S.depth + dd > S.max) {
       dd = Math.max(0, S.max - S.depth);
@@ -783,7 +865,7 @@ export class VRMode {
       return;
     }
     // the hand stays on the handle, wherever the controller wanders
-    _m.multiplyMatrices(mesh.matrixWorld, MELEE_ON).decompose(_p, _q, _s);
+    _m.multiplyMatrices(mesh.matrixWorld, sized(MELEE_ON, h)).decompose(_p, _q, _s);
     poseArm(h, aR, _p, _q, pole(aR));
     curl(aR, 1.5);
   }
@@ -805,7 +887,7 @@ export class VRMode {
     m.vel.copy(mesh.position).sub(m.lastPos).divideScalar(Math.max(dt, 1e-3));
     if (m.vel.length() > 30) m.vel.set(0, 0, 0);
     m.lastPos.copy(mesh.position);
-    _m.multiplyMatrices(gm, MELEE_ON).decompose(_p, _q, _s);
+    _m.multiplyMatrices(gm, sized(MELEE_ON, h)).decompose(_p, _q, _s);
     poseArm(h, aR, _p, _q, pole(aR));
     curl(aR, 1.5);
     // contact: the business end, swept from last frame to this one
@@ -845,7 +927,7 @@ export class VRMode {
       m.land(hit, a0, b0, a1, b1, dt, 1);
       m.swing = null;
       // (a knife stays in them till you pull it back out; anything else springs free)
-      if (m.stuckIn && !d.stab) m.unstick(true, true);
+      if (m.stuckIn && !d.stab && !m.stuckIn.chop) m.unstick(true, true);
       if (m.stuckIn) this.prevSeg = null;
       this.hitSkip.set(hit.actor, performance.now());
       skip.add(hit.actor);
@@ -857,15 +939,18 @@ export class VRMode {
   // ---- the menu: point with either hand, pull the trigger ----
   buildMenu() {
     const c = document.createElement('canvas');
-    const ch = 60 + this.MENU.length * 120;
-    c.width = 512; c.height = ch;
+    const L = this.MENU;
+    const cw = this.menuPage === 'settings' ? 1024 : 512;
+    const ch = Math.max(...L.map((b) => b.y + b.h)) + 40;
+    c.width = cw; c.height = ch;
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5 * ch / 512),
+    const pw = cw === 1024 ? 0.85 : 0.5;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(pw, pw * ch / cw),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false }));
     mesh.renderOrder = 999;
     mesh.frustumCulled = false;
-    mesh.userData = { c, tex, hover: -2, n: this.MENU.length };
+    mesh.userData = { c, tex, hover: -2, n: this.MENU.length, page: this.menuPage };
     // a pointer line from whichever hand is aiming at it
     const lineMat = new THREE.LineBasicMaterial({ color: 0xffd65a, transparent: true, opacity: 0.8, depthTest: false, fog: false });
     this.laser = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(), V(0, 0, -1)]), lineMat);
@@ -878,12 +963,31 @@ export class VRMode {
   }
   // buttons, in canvas pixels
   get MENU() {
+    if (this.menuPage === 'settings') {
+      // every on/off setting worth having in a headset, two columns; a click flips it (the menu stays open)
+      const items = SCHEMA.filter((c) => c.name === 'Gore' || c.name === 'Graphics')
+        .flatMap((c) => c.items).filter((it) => !it.type);
+      const rows = [{ label: 'Back', act: () => this.openPage('main'), x: 30, y: 30, w: 964, h: 80, keep: true }];
+      items.forEach((it, i) => rows.push({
+        label: it.label, k: it.k, keep: true,
+        x: 30 + (i % 2) * 492, y: 130 + Math.floor(i / 2) * 82, w: 472, h: 70,
+        act: () => setSetting(it.k, !settings[it.k]),
+      }));
+      return rows;
+    }
     return [
       { label: 'Reset world', act: () => this.resetWorld?.() },
       { label: 'Clear blood', act: () => this.clearBlood?.() },
+      { label: 'Settings', act: () => this.openPage('settings'), keep: true },
       { label: 'Calibrate height', act: () => this.calibrate() },
       ...(this.backToMenu ? [{ label: 'Back to menu', act: () => this.backToMenu() }] : []),
-    ].map((b, i) => ({ ...b, y: 40 + i * 120 }));
+    ].map((b, i) => ({ ...b, x: 30, y: 40 + i * 120, w: 452, h: 100 }));
+  }
+  /** Switch the menu to another page, in the same spot. */
+  openPage(page) {
+    this.menuPage = page;
+    this.menu.visible = false;
+    this.toggleMenu(true);
   }
   drawMenu(hover) {
     const W = this.menu, { c, tex } = W.userData;
@@ -894,19 +998,37 @@ export class VRMode {
     g.fillStyle = 'rgba(18,18,22,0.85)';
     g.beginPath(); g.roundRect(0, 0, c.width, c.height, 28); g.fill();
     this.MENU.forEach((b, i) => {
-      g.fillStyle = i === hover ? '#ffd65a' : 'rgba(255,255,255,0.1)';
-      g.beginPath(); g.roundRect(30, b.y, c.width - 60, 100, 20); g.fill();
-      g.fillStyle = i === hover ? '#15130c' : '#f2f0ea';
-      g.font = 'bold 42px system-ui, sans-serif';
-      g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(b.label, c.width / 2, b.y + 50);
+      const on = b.k ? !!settings[b.k] : null;
+      g.fillStyle = i === hover ? '#ffd65a' : on === false ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.1)';
+      g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 18); g.fill();
+      g.fillStyle = i === hover ? '#15130c' : on === false ? '#8d8a84' : '#f2f0ea';
+      g.textBaseline = 'middle';
+      if (b.k) {
+        // a setting: its name, and an on/off pill at the right
+        g.font = 'bold 26px system-ui, sans-serif';
+        g.textAlign = 'left';
+        let t = b.label;
+        while (g.measureText(t).width > b.w - 130 && t.length > 4) t = t.slice(0, -2) + '…';
+        g.fillText(t, b.x + 18, b.y + b.h / 2 + 1);
+        const px = b.x + b.w - 96, py = b.y + b.h / 2 - 18;
+        g.fillStyle = on ? '#4fbf6a' : 'rgba(255,255,255,0.18)';
+        g.beginPath(); g.roundRect(px, py, 78, 36, 18); g.fill();
+        g.fillStyle = '#fff';
+        g.beginPath(); g.arc(on ? px + 60 : px + 18, py + 18, 14, 0, Math.PI * 2); g.fill();
+      } else {
+        g.font = 'bold 42px system-ui, sans-serif';
+        g.textAlign = 'center';
+        g.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+      }
     });
     tex.needsUpdate = true;
   }
-  toggleMenu() {
+  toggleMenu(keepPage = false) {
     if (this.menu?.visible) { this.menu.visible = false; this.laser.visible = false; return; }
-    // (built for a different set of buttons - Back to menu comes and goes with the map: again, to fit)
-    if (this.menu && this.menu.userData.n !== this.MENU.length) {
+    if (!keepPage) this.menuPage = 'main';
+    // (built for a different set of buttons - Back to menu comes and goes with the map, the
+    // settings page is its own size: again, to fit)
+    if (this.menu && (this.menu.userData.n !== this.MENU.length || this.menu.userData.page !== this.menuPage)) {
       this.menu.removeFromParent(); this.menu.geometry.dispose(); this.menu.material.map.dispose(); this.menu.material.dispose();
       this.laser.removeFromParent(); this.laser.geometry.dispose(); this.laser.material.dispose();
       this.menu = null;
@@ -918,8 +1040,10 @@ export class VRMode {
     _v.set(0, 0, -1).applyQuaternion(this.camera.quaternion).setY(0);
     if (_v.lengthSq() < 1e-4) _v.set(0, 0, -1);
     _v.normalize();
-    M.position.copy(this.camera.position).addScaledVector(_v, 0.55);
-    M.position.y -= 0.12;
+    // (the big settings page a little further off, so it all fits in view)
+    const big = this.menuPage === 'settings';
+    M.position.copy(this.camera.position).addScaledVector(_v, big ? 0.85 : 0.55);
+    M.position.y -= big ? 0.05 : 0.12;
     M.lookAt(this.headWorld(_w));
     M.visible = true;
     M.userData.hover = -2;
@@ -939,14 +1063,16 @@ export class VRMode {
       const hit = this.rc.intersectObject(M, false)[0];
       if (!hit) continue;
       const { c } = M.userData, px = hit.uv.x * c.width, py = (1 - hit.uv.y) * c.height;
-      const i = this.MENU.findIndex((b) => px > 30 && px < c.width - 30 && py > b.y && py < b.y + 100);
+      const i = this.MENU.findIndex((b) => px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h);
       by = slot; dist = hit.distance;
       if (i >= 0) hover = i;
       const down = this.btnDown(hand, 0), was = this.menuTrig[hand];
       this.menuTrig[hand] = down;
       if (down && !was && i >= 0) {
         this.buzz(hand, 0.5, 50);
-        this.MENU[i].act();
+        const b = this.MENU[i];
+        b.act();
+        if (b.keep) { if (this.menu === M) { M.userData.hover = -2; this.drawMenu(i); } return; }
         M.visible = false; this.laser.visible = false;
         return;
       }

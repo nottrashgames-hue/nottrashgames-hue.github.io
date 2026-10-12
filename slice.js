@@ -742,6 +742,12 @@ export function freshMatrices(actor) {
   for (const G of h.visualGroups || [h.root]) G.updateMatrixWorld(true);
 }
 
+/** Part of a weapon stuck in the body (melee.js notBody): not flesh, never cut. */
+function inWeapon(o, top) {
+  for (let x = o; x && x !== top; x = x.parent) if (x.userData.notBody) return true;
+  return false;
+}
+
 /** Hide something for good (until a respawn): out of every render / shadow / ray layer. */
 function hide(o, rec) {
   o.traverse((x) => {
@@ -1002,7 +1008,7 @@ export class Dismember {
     const own = [];
     const walk = (o) => {
       for (const c of o.children) {
-        if (partGroups.has(c) || c.userData.cap) continue;
+        if (partGroups.has(c) || c.userData.cap || c.userData.notBody) continue;
         // (into cut-away meshes too: an outline's stump hangs off the hidden mesh it outlined)
         if (c.isMesh && !c.isSkinnedMesh && !c.userData.cut) own.push(c);
         walk(c);
@@ -1268,7 +1274,7 @@ export class Dismember {
     const side = { neg: [], pos: [] };
     const outlines = [];
     const meshes = [];
-    G.traverse((o) => { if (o.isMesh && o.layers.mask !== 0 && o.visible) meshes.push(o); });
+    G.traverse((o) => { if (o.isMesh && o.layers.mask !== 0 && o.visible && !inWeapon(o, G)) meshes.push(o); });
     const Tc = makeTear(planeC, TEAR.loose);
     for (const o of meshes) {
       const M = new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld);   // mesh -> piece frame
@@ -1435,6 +1441,7 @@ export class Dismember {
     for (const o of rec.hidden) { o.layers.mask = o.userData._mask ?? 1; o.userData.cut = false; }
     for (const o of rec.added) o.removeFromParent();
     for (const [arr, orig, stump] of rec.swaps.reverse()) { const i = arr.indexOf(stump); if (i >= 0) arr[i] = orig; }
+    actor.healGash?.(); // (gash.js: and the half-cut ones)
     actor._cut = null;
     // (a new generation of this body: cuts from before it no longer apply)
     actor.cutGen = (actor.cutGen || 0) + 1;

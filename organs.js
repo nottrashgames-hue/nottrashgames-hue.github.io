@@ -610,7 +610,7 @@ export class Organs {
    */
   vomit(bloody = false) {
     const A = this.actor;
-    if (this.fit) return;
+    if (this.fit || !settings.vomit) return;
     const dur = rnd(1.5, 2.3);
     this.fit = { t: 0, dur, next: rnd(0.25, 0.4), bloody };
     if (!A.remote && A.mode === 'anim') A.gest?.play('vomit', dur + 0.4);

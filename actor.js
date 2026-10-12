@@ -446,6 +446,7 @@ export class Actor {
     this.recovered = false;
     // (cut up: whole again)
     this.unsever?.();
+    this.healGash?.(); // (gash.js: half-cut limbs whole again)
     // (gone up in hearts: back in one piece, and seen again)
     if (this.poofed) { this.poofed = false; this.hero.setVisible(true); }
     this.crippled = false;

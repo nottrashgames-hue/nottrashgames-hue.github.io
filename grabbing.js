@@ -30,7 +30,7 @@ const V_STR = 3.2;
 const REACH = 1.8;      // m, flat from our feet, to what we can take hold of
 const REACH_IN = 0.22;  // s for a hand to get there
 const LET_GO = 1.75;    // m from the shoulder: stretched further than this (for a moment), the grip is lost
-const F_HAND = 560;     // N one hand can pull with
+const F_HAND = 1150;    // N one hand can pull with (enough, two-handed, to haul a grown man clean off the floor)
 const F_CHUNK = 320;    // N on a loose piece
 const RIP_TIME = 1.15;  // s of straining before the torso tears
 
@@ -406,7 +406,7 @@ export class Grabber {
       g.vT.copy(h.vel);
       // someone on their feet, hauled on: they're pulled off balance (and stagger along)
       if (A && !A.remote && A.mode === 'anim' && g.t > REACH_IN && g.T.distanceTo(g.W) > 0.16) {
-        A.goRagdoll('stumble', { balance: 0.9, decay: 0.12 });
+        A.goRagdoll('stumble', { balance: 0.6, decay: 0.12 });
       }
     }
     if (!this.grips.length) return;
@@ -418,7 +418,7 @@ export class Grabber {
     const remote = this.grips.filter((g) => g.A?.remote && g.t > REACH_IN);
     if (remote.length && this.ctx.tug) {
       this.tugT = (this.tugT || 0) - dt;
-      if (this.tugT <= 0) { this.tugT = 1 / 15; this.ctx.tug(remote[0].A, remote); }
+      if (this.tugT <= 0) { this.tugT = 1 / 30; this.ctx.tug(remote[0].A, remote); }
     }
     this.load *= Math.exp(-dt * 4);
   }
@@ -564,16 +564,19 @@ export function pullPart(g, H, share = 1) {
   const W = rd.point(g.name, g.local, _w);
   const t = b.translation(), lv = b.linvel(), av = b.angvel();
   const vel = _f.set(av.x, av.y, av.z).cross(_e.set(W.x - t.x, W.y - t.y, W.z - t.z)).add(_v.set(lv.x, lv.y, lv.z));
-  const M = (rd.mass || 70) * 0.45 / share;
+  const M = (rd.mass || 70) * 0.7 / share;
   const str = g.str || 1;
-  const wn = 6.5 * Math.sqrt(str);
-  const F = _e.subVectors(g.T, W).multiplyScalar(wn * wn).addScaledVector(_v.subVectors(g.vT, vel), 2 * 0.9 * wn).multiplyScalar(M);
-  F.y += P.mass * 9.81;
+  // (a stiff, well-damped hold: what's in your hands goes where they go, with no wobble)
+  const wn = 10.5 * Math.sqrt(str);
+  const F = _e.subVectors(g.T, W).multiplyScalar(wn * wn).addScaledVector(_v.subVectors(g.vT, vel), 2 * 1.05 * wn).multiplyScalar(M);
+  // the hands carry the body's weight too (shared out between them), not just the part's: lifted,
+  // they come up off the ground instead of hanging off a stretched arm
+  F.y += ((rd.mass || 70) * 0.55 / share + P.mass) * 9.81;
   F.clampLength(0, F_HAND * str);
   const mag = F.length();
   if (mag < 1e-6) return 0;
   // the part held takes what it can; the rest is passed on up the limb to the hips
-  const own = Math.min(mag, P.mass * 90 * Math.sqrt(str));
+  const own = Math.min(mag, P.mass * 160 * Math.sqrt(str));
   b.applyImpulseAtPoint(_v.copy(F).multiplyScalar((own / mag) * H), W, true);
   const rest = mag - own;
   if (rest <= 0) return mag;
@@ -610,7 +613,8 @@ export class Tugged {
         continue;
       }
       // hauled on: off balance
-      if (A.mode === 'anim' && !A.hero.action) A.goRagdoll('stumble', { balance: 0.9, decay: 0.12 });
+      // (held by someone: they've got you - much less fight in your legs than a shove)
+      if (A.mode === 'anim' && !A.hero.action) A.goRagdoll('stumble', { balance: 0.55, decay: 0.12 });
       // (the hold's target carries on moving between messages)
       for (const g of S.grips) g.T.addScaledVector(g.vT, dt);
     }

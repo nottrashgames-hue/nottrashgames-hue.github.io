@@ -38,6 +38,10 @@ export function setLevelSolids(world, solids = []) {
   for (const c of S.cols) world.removeCollider(c, false);
   S.cols.length = 0;
   world.camBlockers.clear();
+  // (the ragdolls' cached list of static colliders - ragdoll.js depenetrate - is stale now: touching
+  // a removed collider panics Rapier, and every physics call after that fails: the game froze)
+  world._staticBounds = null;
+  world._staticGen = (world._staticGen || 0) + 1;
   for (const s of solids) {
     const c = s.type === 'box'
       ? S.add(RAPIER.ColliderDesc.cuboid(s.w / 2, s.h / 2, s.d / 2).setTranslation(s.x, s.y, s.z))

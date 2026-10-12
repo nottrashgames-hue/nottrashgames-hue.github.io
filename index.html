@@ -15,6 +15,7 @@
     if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
   </script>
   <script src="vrgrant.js"></script>
+  <script src="persist.js"></script>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="mobile.css" />
   <script type="importmap">
@@ -164,6 +165,8 @@
       </div>
     </div>
   </div>
-  <script type="module" src="main.js"></script>
+  <script type="module">
+    (window.__persistReady || Promise.resolve()).then(function () { import('./main.js'); });
+  </script>
 </body>
 </html>

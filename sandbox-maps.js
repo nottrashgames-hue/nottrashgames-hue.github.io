@@ -118,6 +118,13 @@ export function buildMenuRoom(scene) {
   lvl.spawnYaw = Math.PI; // (facing the board)
   lvl.dummyAt = V(3.5, 0, 0);
   lvl.menuBoard = { pos: V(0, 2.4, -S + 0.02), yaw: 0 };
+  // the dressing booth on the east wall: two partitions, a mat, the mirror and its panel (booth.js)
+  const wood = new THREE.MeshStandardMaterial({ color: 0x6b4a33, roughness: 0.7 });
+  for (const z of [1.7, 5.9]) box(scene, colliders, 1.5, 2.6, 0.1, S - 0.75, 0, z, wood, 'wood');
+  const mat = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 4.1), new THREE.MeshStandardMaterial({ color: 0x2f4a5e, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  mat.rotation.x = -Math.PI / 2; mat.position.set(S - 0.75, 0.002, 3.8); mat.receiveShadow = true;
+  scene.add(mat);
+  lvl.booth = { mirror: { pos: V(S - 0.03, 1.2, 4.75), yaw: -Math.PI / 2 }, panel: { pos: V(S - 0.03, 1.45, 2.7), yaw: -Math.PI / 2 } };
   return lvl;
 }
 

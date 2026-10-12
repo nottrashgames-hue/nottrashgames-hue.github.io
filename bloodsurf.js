@@ -33,6 +33,8 @@ const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const _sph = new THREE.Sphere();
+const _fp = new THREE.Vector3();
+const _shown = [];
 
 let EMPTY = null;
 const emptyTex = () => {
@@ -143,7 +145,8 @@ class Surf {
     this.sys = sys;
     this.o = origin.clone(); this.u = u.clone(); this.v = v.clone(); this.w = w; this.h = h;
     this.n = n.clone();
-    const rw = Math.min(1024, Math.ceil(w * PPM)), rh = Math.min(1024, Math.ceil(h * PPM));
+    const ppm = sys.ppm || PPM;
+    const rw = Math.min(1024, Math.ceil(w * ppm)), rh = Math.min(1024, Math.ceil(h * ppm));
     this.sx = rw / w; this.sy = rh / h;
     const canvas = document.createElement('canvas');
     canvas.width = rw; canvas.height = rh;
@@ -158,11 +161,11 @@ class Surf {
     this.tex.premultiplyAlpha = true;
     // quad with explicit per-corner blood uvs (s/w, t/h)
     const g = new THREE.BufferGeometry();
-    const P = (s, t) => this.o.clone().addScaledVector(u, s).addScaledVector(v, t).addScaledVector(n, 0.006);
-    const c = [P(0, 0), P(w, 0), P(w, h), P(0, h)];
-    g.setAttribute('position', new THREE.Float32BufferAttribute(c.flatMap((p) => p.toArray()), 3));
+    // (the quad only spans the blocks that hold blood - see fit - so a few drops on a big tile
+    // don't cost a whole 8 m square of transparent, discarding fragments)
+    g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(12), 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 2, 3].flatMap(() => n.toArray()), 3));
-    g.setAttribute('buv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    g.setAttribute('buv', new THREE.Float32BufferAttribute(new Float32Array(8), 2));
     // wind the quad so its front face points along n: DoubleSide flips the normal of back
     // faces, which would light the blood as if it faced into the floor (nearly black)
     const front = new THREE.Vector3().crossVectors(u, v).dot(n) > 0;
@@ -191,6 +194,7 @@ class Surf {
     this.gw = Math.max(1, Math.ceil(w / CELL)); this.gh = Math.max(1, Math.ceil(h / CELL));
     this.wet = new Float32Array(this.gw * this.gh);
     this.inkc = new Uint8Array(this.gw * this.gh); // which ink most of that wet blood is
+    this.own = new Uint16Array(this.gw * this.gh); // whose body most of it came off (ownId; 0: nobody's)
     this.dirty = false;
     this.upT = 0;
     this.wetT = 0;
@@ -200,6 +204,37 @@ class Surf {
     this.probes = [[0.5, 0.5], [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]].map(([a, c]) =>
       this.o.clone().addScaledVector(u, w * a).addScaledVector(v, h * c).addScaledVector(n, 0.05));
     this.occ = false;
+    this.lo = null; // [i0, j0, i1, j1]: the blocks with blood in them (null: none)
+    this.cc = this.c.clone(); this.cr = this.r; // the sphere round just those
+    this.mesh.visible = false;
+  }
+  /** Lay the quad over blocks i0..i1, j0..j1 only. */
+  fit(i0, j0, i1, j1) {
+    this.lo = [i0, j0, i1, j1];
+    const s0 = i0 * BLOCK, t0 = j0 * BLOCK, s1 = Math.min(this.w, (i1 + 1) * BLOCK), t1 = Math.min(this.h, (j1 + 1) * BLOCK);
+    const g = this.mesh.geometry, pos = g.attributes.position, uv = g.attributes.buv;
+    const P = _fp;
+    [[s0, t0], [s1, t0], [s1, t1], [s0, t1]].forEach(([s, t], k) => {
+      P.copy(this.o).addScaledVector(this.u, s).addScaledVector(this.v, t).addScaledVector(this.n, 0.006);
+      pos.setXYZ(k, P.x, P.y, P.z);
+      uv.setXY(k, s / this.w, t / this.h);
+    });
+    pos.needsUpdate = uv.needsUpdate = true;
+    g.computeBoundingSphere();
+    this.cc.copy(this.o).addScaledVector(this.u, (s0 + s1) / 2).addScaledVector(this.v, (t0 + t1) / 2);
+    this.cr = Math.hypot(s1 - s0, t1 - t0) / 2;
+  }
+  /** Refit the quad to whatever blocks still hold blood (after some dried away). */
+  refit() {
+    let i0 = Infinity, j0 = Infinity, i1 = -1, j1 = -1;
+    for (let k = 0; k < this.bt.length; k++) {
+      if (this.bt[k] < 0) continue;
+      const i = k % this.bw, j = (k / this.bw) | 0;
+      if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; if (j > j1) j1 = j;
+    }
+    if (i1 < 0) { this.lo = null; this.mesh.visible = false; return; }
+    const L = this.lo;
+    if (!L || L[0] !== i0 || L[1] !== j0 || L[2] !== i1 || L[3] !== j1) this.fit(i0, j0, i1, j1);
   }
   st(p, out = { s: 0, t: 0 }) {
     const dx = p.x - this.o.x, dy = p.y - this.o.y, dz = p.z - this.o.z;
@@ -224,6 +259,9 @@ class Surf {
     const j0 = clamp(Math.floor(t0 / BLOCK), 0, this.bh - 1), j1 = clamp(Math.floor(t1 / BLOCK), 0, this.bh - 1);
     const now = this.sys.time;
     let changed = false;
+    const L = this.lo;
+    if (!L) this.fit(i0, j0, i1, j1);
+    else if (i0 < L[0] || j0 < L[1] || i1 > L[2] || j1 > L[3]) this.fit(Math.min(i0, L[0]), Math.min(j0, L[1]), Math.max(i1, L[2]), Math.max(j1, L[3]));
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
       const k = j * this.bw + i;
       // (the clock starts when blood first lands: more blood on top doesn't keep a stain
@@ -246,15 +284,17 @@ class Surf {
   age() {
     if (!this.live) return;
     const now = this.sys.time, bw = this.bw;
+    let baked = false;
     for (let k = 0; k < this.bt.length; k++) {
       const b = this.bt[k];
       if (b < 0) continue;
       const a = (now - b) / DRY_T;
       // (a baked block's wet canvas is empty: its age reads 0 so it doesn't tint fresh blood beside it)
-      if (a >= 1) { this.bake(k % bw, Math.floor(k / bw)); this.ageData[k * 4] = 0; }
+      if (a >= 1) { this.bake(k % bw, Math.floor(k / bw)); this.ageData[k * 4] = 0; baked = true; }
       else this.ageData[k * 4] = Math.round(a * 255);
     }
     this.ageTex.needsUpdate = true;
+    if (baked) this.refit();
   }
   bake(i, j) {
     const k = j * this.bw + i;
@@ -291,7 +331,7 @@ class Surf {
       const i = this.cell(x, y);
       if (i >= 0) {
         const w = this.wet[i];
-        if (a > w * 0.6) this.inkc[i] = INK;
+        if (a > w * 0.6) { this.inkc[i] = INK; this.own[i] = OWN; }
         this.wet[i] = Math.min(1.5, w + a);
       }
     }
@@ -305,6 +345,17 @@ class Surf {
 // Ink: the colour being painted right now (an inks.js index, 0 red). Every painter sets it
 // from the surfaces' one-shot ink before drawing, and paints in that ink's key colour.
 let INK = 0;
+// Whose body the blood being laid down came off (ownId), 0 for nobody's: a body never soaks its
+// own blood back up off the floor (dragged along, it would wipe and re-collect it forever)
+let OWN = 0;
+const OWNERS = new WeakMap();
+let ownN = 0;
+export const ownId = (a) => {
+  if (!a) return 0;
+  let id = OWNERS.get(a);
+  if (!id) { id = (ownN = ownN % 65535 + 1); OWNERS.set(a, id); }
+  return id;
+};
 const BRUSH = [];
 const inkFill = () => `rgb(${inkRGB(INK)})`;
 function brush() {
@@ -403,6 +454,7 @@ export class BloodSurfaces {
     this.smearing = new Set(); // surfaces with smears queued this frame
     this.ink = 0;   // the next paint call's ink (inks.js); read once, then red again
     this.picked = 0; // the ink of the blood the last pickup() took
+    this.own = 0;    // the next paint call's owner (by); read once, then nobody's
     this.time = 0;
     this.ageT = 0;
     this.rebuild();
@@ -415,26 +467,37 @@ export class BloodSurfaces {
     this.view = null; // { pos, frustum, occluded(from, to), far }
     this.uploads = 6;
     this.upRate = 1 / 30;
+    this.maxShown = Infinity; // most stained surfaces drawn at once (nearest first)
+    this.ppm = PPM;           // canvas resolution of surfaces made from now on (lower in a headset)
     this.occT = 0;
   }
 
   /** Who's drawn this frame: in the view, near enough, not behind a wall (that's checked a few times a second). */
   cull(dt) {
     const Vw = this.view;
-    if (!Vw) return;
+    if (!Vw) { for (const S of this.all) S.mesh.visible = !!S.lo; return; }
     this.occT -= dt;
     const recheck = this.occT <= 0;
     if (recheck) this.occT = 0.15;
     const far = Vw.far || 40;
+    _shown.length = 0;
     for (const S of this.all) {
-      const d = S.c.distanceTo(Vw.pos) - S.r;
-      let vis = d < far && (!Vw.frustum || Vw.frustum.intersectsSphere(_sph.set(S.c, S.r)));
+      // (nothing on it - all dried away, or never painted: nothing to draw)
+      if (!S.lo) { S.mesh.visible = false; continue; }
+      const d = S.cc.distanceTo(Vw.pos) - S.cr;
+      let vis = d < far && (!Vw.frustum || Vw.frustum.intersectsSphere(_sph.set(S.cc, S.cr)));
       if (vis && Vw.occluded && recheck) {
         // (standing on it or right by it: no need to look)
         S.occ = d > 2 && S.probes.every((p) => Vw.occluded(Vw.pos, p));
       }
       if (vis && S.occ) vis = false;
       S.mesh.visible = vis;
+      if (vis) { S.dist = d; _shown.push(S); }
+    }
+    // (a headset: only the nearest few stained surfaces are drawn at all)
+    if (_shown.length > this.maxShown) {
+      _shown.sort((a, b) => a.dist - b.dist);
+      for (let i = this.maxShown; i < _shown.length; i++) _shown[i].mesh.visible = false;
     }
   }
 
@@ -501,7 +564,9 @@ export class BloodSurfaces {
 
   /** The next paint call (only that one) is this blood colour (actor or 0/1). */
   inked(b) { this.ink = inkOf(b); return this; }
-  takeInk() { INK = this.ink | 0; this.ink = 0; return INK; }
+  takeInk() { INK = this.ink | 0; this.ink = 0; OWN = this.own | 0; this.own = 0; return INK; }
+  /** The next paint call (only that one) is blood that came off this body (see OWN). */
+  by(actor) { this.own = ownId(actor); return this; }
 
   // ---------- painting ----------
   /**
@@ -560,7 +625,8 @@ export class BloodSurfaces {
   }
 
   /** Blood pooling on a horizontal surface under p: a soft, slowly spreading puddle. */
-  pool(p, r, amount) {
+  /** look: how thickly it shows each time (a slowly filling puddle: < 1) - not how wet it is. */
+  pool(p, r, amount, look = 1) {
     if (!floorOn()) return;
     r *= 1.2 * Math.sqrt(Math.min(3, settings.bloodAmount));
     if (noInk(this.takeInk())) return;
@@ -569,7 +635,7 @@ export class BloodSurfaces {
     S.paint((g) => {
       for (let i = 0; i < 3; i++) {
         const q = rnd(0, Math.PI * 2), o = r * rnd(0, 0.3);
-        dab(g, s + Math.cos(q) * o, t + Math.sin(q) * o, r * rnd(0.8, 1.1), r * rnd(0.7, 1), rnd(0, 3), 0.12 + 0.12 * amount);
+        dab(g, s + Math.cos(q) * o, t + Math.sin(q) * o, r * rnd(0.8, 1.1), r * rnd(0.7, 1), rnd(0, 3), (0.12 + 0.12 * amount) * look);
       }
     }, ...box(s, t, r * 1.5));
     S.wetAdd(s, t, r * 0.8, 0.12 * amount);
@@ -592,7 +658,7 @@ export class BloodSurfaces {
     (S.smears ||= []).push(A.s, A.t, B.s, B.t, width, load, ink);
     this.smearing.add(S);
     S.wetAdd((A.s + B.s) / 2, (A.t + B.t) / 2, width * 0.5, 0.05 * load);
-    INK = 0;
+    INK = 0; OWN = 0;
   }
 
   /**
@@ -613,6 +679,7 @@ export class BloodSurfaces {
       this.smearing.add(S);
       INK = ink; S.wetAdd((A.s + B.s) / 2, (A.t + B.t) / 2, width * 0.4, 0.015 * load); INK = 0;
     }
+    OWN = 0;
   }
 
   flushTracks(S) {
@@ -711,12 +778,15 @@ export class BloodSurfaces {
     const i = S.cell(s, t);
     return i < 0 ? 0 : S.wet[i] * (1 - S.dryness(s, t));
   }
-  pickup(p, amount) {
+  /** by: whose body is soaking it up - pickedOwn says whether what it got came off that very body. */
+  pickup(p, amount, by = null) {
     const S = this.horizontal(p, false);
+    this.pickedOwn = false;
     if (!S) return 0;
     const { s, t } = S.st(p);
     const i = S.cell(s, t);
     if (i < 0) return 0;
+    this.pickedOwn = !!by && S.own[i] === ownId(by);
     // drying blood gets tacky: less and less of it comes away
     const got = Math.min(S.wet[i] * (1 - S.dryness(s, t)), amount);
     S.wet[i] -= got;
@@ -814,7 +884,7 @@ export class BloodSurfaces {
       S.wetT += dt;
       if (S.wetT > 0.5) {
         const k = DRY * S.wetT;
-        for (let i = 0; i < S.wet.length; i++) if (S.wet[i] > 0) S.wet[i] = Math.max(0, S.wet[i] - k);
+        if (S.live) for (let i = 0; i < S.wet.length; i++) if (S.wet[i] > 0) S.wet[i] = Math.max(0, S.wet[i] - k);
         S.wetT = 0;
       }
       // a big canvas re-upload is the expensive part: each surface at most 30 times a second

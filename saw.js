@@ -28,7 +28,7 @@ const _a = V(), _b = V(), _p = V(), _q = new THREE.Quaternion(), _s = V();
 const GROOVE_EVERY = 0.035; // of the way through, between deepenings of the kerf
 
 /** The kerf, opened a little deeper into the meshes: a narrow trench along the blade's line. */
-function groove(A, part, S, g, axis) {
+export function groove(A, part, S, g, axis) {
   const W = A.wounds;
   if (!W) return;
   const names = TORSO.has(part) ? ['pelvis', 'spine', 'chest'] : [part];

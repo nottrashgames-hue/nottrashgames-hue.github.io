@@ -397,7 +397,7 @@ export class Wounds {
       this.sys.inked(this.actor).spray(point, refl.normalize(), sp * 0.8, Math.round(2 + sev * 10), 0.5, 0.8 + sev * 0.3);
       // blood slapped onto the floor right where the hit happened
       const gy = this.sys.colliders.groundAt(point.x, point.z, point.y + 0.05);
-      if (point.y - gy < 0.25) { const fp = V(point.x, gy, point.z); this.floor.inked(this.actor).splat(this.floor.horizontal(fp), fp, vIn, 0.03 + sev * 0.04, 0.8); }
+      if (point.y - gy < 0.25) { const fp = V(point.x, gy, point.z); this.floor.inked(this.actor).by(this.actor).splat(this.floor.horizontal(fp), fp, vIn, 0.03 + sev * 0.04, 0.8); }
       this.wetPart(part, 0.15 + sev * 0.2);
     }
   }
@@ -735,7 +735,10 @@ export class Wounds {
         // pick up what's under this spot
         const wet = F.wetAt(fp);
         if (wet > 0.02) {
-          const got = F.pickup(fp, Math.min(wet, 0.4 * dt + 0.004));
+          let got = F.pickup(fp, Math.min(wet, 0.4 * dt + 0.004), this.actor);
+          // its own blood (what it bled or smeared there) still drags along with it, but only a
+          // little of it soaks back in each time - the wiping wins, and it comes up clean in the end
+          if (F.pickedOwn) got *= 0.6;
           if (got > 0.001) {
             // (someone else's blood or vomit, off the floor, in its own colour; ours as ours)
             if (F.picked !== inkOf(this.actor)) vol.addForeign(s.sp, SPACING * (s.cloth ? 1.1 : 0.9), inkFilm(F.picked), Math.min(0.6, got * 7));
@@ -751,9 +754,12 @@ export class Wounds {
           if (len > 0.012) {
             const load = Math.max(vol.sample(s.sp, 0), s.cloth ? vol.sample(s.sp, 3) * 0.45 : 0);
             if (load > 0.1) {
-              F.inked(this.parts[s.part]?.ink ?? inkOf(this.actor)).smear(s.anchor, fp, SPACING * rnd(1.2, 1.7), clamp(load * 1.15, 0, 1));
+              F.inked(this.parts[s.part]?.ink ?? inkOf(this.actor)).by(this.actor).smear(s.anchor, fp, SPACING * rnd(1.2, 1.7), clamp(load * 1.15, 0, 1));
               vol.add(s.sp, SPACING * 0.7, 0, -Math.min(0.3, len * 1.2) * load);
             }
+            // rubbed along the ground: the blood on this spot slowly wears off too (wet or
+            // dried, ours or anyone's) - a few metres of dragging and it comes up clean
+            vol.wipe(s.sp, SPACING * 0.8, Math.min(0.06, len * 0.2));
             s.anchor.copy(fp);
           }
         } else s.anchor = fp.clone();
@@ -820,14 +826,16 @@ export class Wounds {
         w.pooled = (w.pooled || 0) + w.bleed * dt;
         w.poolT = (w.poolT || 0) - dt;
         if (w.poolT <= 0) {
-          w.poolT = 0.25;
-          const r = Math.min(0.34, 0.035 + Math.sqrt(w.pooled) * 0.075);
-          this.floor.inked(this.actor).pool(V(wp.x + rnd(-0.02, 0.02), wgy, wp.z + rnd(-0.02, 0.02)), r, Math.min(1, w.bleed * 0.8 + 0.15));
+          w.poolT = 0.4;
+          // (it creeps outward as the blood keeps coming: a small spot at first, filling in thinly
+          // each time, a wide puddle only after a long while lying in it)
+          const r = Math.min(0.34, 0.02 + Math.sqrt(w.pooled) * 0.035);
+          this.floor.inked(this.actor).by(this.actor).pool(V(wp.x + rnd(-0.02, 0.02), wgy, wp.z + rnd(-0.02, 0.02)), r, Math.min(1, w.bleed * 0.8 + 0.15), 0.35);
         }
       }
       w.next -= dt;
       if (w.next <= 0 && this.drips.length < 7) {
-        w.next = rnd(0.9, 2.2) / w.bleed / Math.max(0.2, settings.bloodAmount);
+        w.next = rnd(1.8, 4) / w.bleed / Math.max(0.2, settings.bloodAmount);
         const vol = rnd(0.6, 1) * Math.min(1, w.bleed);
         // start a little off the wound so each drip finds its own line
         const d = { ...hit, bary: hit.bary.clone(), point: hit.point.clone(), normal: hit.normal.clone(), sp: hit.sp.clone() };

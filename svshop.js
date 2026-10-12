@@ -6,7 +6,7 @@
 
 // what each one's worth: cheap junk and tools up to the heavy guns
 export const PRICES = {
-  melee: { ruler: 5, knife: 25, bat: 30, hammer: 35, crowbar: 45, hatchet: 70, machete: 90, spear: 180, fireaxe: 200, sledge: 220, longsword: 260 },
+  melee: { ruler: 5, pencil: 3, knife: 25, bat: 30, hammer: 35, crowbar: 45, hatchet: 70, machete: 90, spear: 180, fireaxe: 200, sledge: 220, longsword: 260 },
   guns: { pistol: 150, shotgun: 400, rifle: 750, dmr: 900, sniper: 1100, mg: 1400, gl: 1600, rocket: 2000 },
   throw: { molotov: 40, gas: 60, frag: 120 },
 };
