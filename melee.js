@@ -349,6 +349,7 @@ export class Melee {
   constructor(type, scene, debris, ctx, rest) {
     this.type = type;
     this.def = WEAPONS[type];
+    this.wtype = type;
     this.scene = scene;
     this.debris = debris;
     this.ctx = ctx; // { actors, sfx, aimPoint, hitWorld, castSeg, shake, blood, player, aiming }
@@ -1009,10 +1010,14 @@ export class Melee {
     }
     const axis = b1.clone().sub(a1).normalize();
     const blade = this.def.hit.kind === 'blade';
+    // a knife only stabs going in point first: swept edge-on (a swipe down, across) it slashes -
+    // a long open gash along the stroke, and it draws on through instead of sticking
+    const thrust = !!this.def.stab && axis.dot(_v1.copy(vel).normalize()) > 0.5;
     // (a chop brings the whole body's weight down with it: it shoves harder too)
     hit.actor.struck(hit.part, hit.point, vel, hit.normal,
       { ...this.def.hit, axis, sev: this.def.hit.sev * power, maxImp: this.def.hit.maxImp * Math.sqrt(power),
-        dent: power, shaft: this.def.seg[1] - this.def.seg[0] > 0.25, stab: !!this.def.stab, harmless: !!this.def.harmless }, this.owner);
+        dent: power, shaft: this.def.seg[1] - this.def.seg[0] > 0.25, stab: thrust, harmless: !!this.def.harmless,
+        label: this.wtype.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()) }, this.owner);
     // edge-first and fast enough: straight through the limb, cut where it met (slice.js)
     const edge = V(0, 0, 1).applyQuaternion(this.mesh.quaternion);
     let cut = false, kerf = null;
@@ -1029,9 +1034,9 @@ export class Melee {
     // a stab driven point first goes in to the hilt (or near it) every time
     // (a chopper that cut in: wedged in its kerf - always in a headset, where you can lean on it
     // and carry on cutting; now and then otherwise)
-    const pointIn = this.def.stab && vel.length() > 3 && axis.dot(_v1.copy(vel).normalize()) > 0.5;
+    const pointIn = thrust && vel.length() > 3;
     if (kerf && hit.actor.groups?.[kerf.part] && (this.owner?.vrSelf || Math.random() < 0.3)) this.stickIn({ ...hit, part: kerf.part }, vel, axis, power, kerf);
-    else if (blade && !this.def.harmless && !cut && !kerf && hit.actor.groups?.[hit.part] && (pointIn || Math.random() < EMBED_CHANCE)) this.stickIn(hit, vel, axis, power);
+    else if (blade && !this.def.harmless && !cut && !kerf && hit.actor.groups?.[hit.part] && (pointIn || (!this.def.stab && Math.random() < EMBED_CHANCE))) this.stickIn(hit, vel, axis, power);
     const k = clamp(vel.length() / 12, 0.4, 1);
     const head = hit.part === 'head' || hit.part === 'neck';
     this.ctx.sfx?.(this.def.sound, Math.min(1, k * 1.15), { rate: 0.92 + Math.random() * 0.14 });

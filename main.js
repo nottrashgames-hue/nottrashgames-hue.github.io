@@ -377,6 +377,7 @@ if (station) {
 const animals = [];
 const actors = [hero, ...npcs.map((n) => n.actor)];
 const blood = new BloodSystem(scene, colliders);
+blood.floor.painter.renderer = renderer; // (stains are painted on the GPU: bloodpaint.js)
 for (const a of actors) blood.addActor(a);
 blood.cars = vehicles.cars;
 blood.sfx = sfx;
@@ -402,7 +403,9 @@ gun.onFire = (origin, dir, shooter, from) => {
   // (your own shots never hit you, VR included)
   const self = false;
   selfHurt = self;
+  shots.weapon = from?.M?.name || null; // (what it was, for the scanner's impact history)
   const hit = shots.fire(origin, dir, self ? null : shooter);
+  shots.weapon = null;
   selfHurt = false;
   if (shooter === hero && hit?.actor && hit.actor !== hero) { hitmark(hit.part === 'head'); hit.actor._heroHitT = performance.now(); }
   if (hit?.actor && hit.part === 'head' && from?.M.pellets > 1) headPellet(hit, origin, dir);
@@ -571,7 +574,11 @@ const nades = new Throwables({
   net: { id: () => (mp?.live ? String(mp.me) : 'l'), send: (m) => { if (mp?.live) mp.send({ k: 'nade', by: mp.me, ...m }); } },
   // (a frag's fragments are rounds: they hit whoever's in the way, and the owners are told)
   // (nobody's spared, the thrower included)
-  fragment: (o, d) => shots.fire(o, d, null, false, 16),
+  fragment: (o, d, by, spare) => {
+    // (a grenade's: a player in the way stops the round, unhurt - it only hurts NPCs)
+    if (spare && shots.pick(o, d, null, 16)?.actor?.isPlayer) return null;
+    return shots.fire(o, d, null, false, 16);
+  },
   sever: (A, part, p, n, v) => dismember.sever(A, part, p, n, v),
   // (a nuke, admin.js: the whole screen goes white, the ground shakes)
   onNuke: (c) => {
@@ -1637,13 +1644,7 @@ function clearBlood() {
   blood.clear();
   for (const w of melees) w.blood?.clear();
   for (const a of actors) {
-    const W = a.wounds;
-    if (W) {
-      for (const w of W.wounds) w.bleed = 0;
-      for (const d of W.drips) d.bead && d.bead.removeFromParent();
-      W.drips = [];
-      W.lost = 0;
-    }
+    a.wounds?.clearBlood();
     if (a.organs && !a.remote) a.organs.internal = 0;
   }
 }
@@ -2775,6 +2776,8 @@ function vrStow(it) {
 function vrEquip(type) {
   if (hero.brain.dead || hero.mode !== 'anim' || hero.seat) return;
   fists.cancel();
+  // (a grenade in hand: put away - or, pin out, dropped live)
+  vr.dropNade();
   // what's in hand: the wheel's own put away, anything else let go of
   for (const it of [hero.gunHeld, hero.meleeHeldL, hero.meleeHeld]) {
     if (!it) continue;
@@ -2783,6 +2786,8 @@ function vrEquip(type) {
   }
   armUp(hero);
   if (!type) return;
+  // the THROW page: a grenade into the right hand (pull its pin with the left)
+  if (type.startsWith('nade:')) { vr.holdNade(type.slice(5)); return; }
   let it = vrKit[type];
   if (it && !(GUNS[type] ? guns : melees).includes(it)) it = null;
   if (it && it.state === 'held' && it.owner !== hero) it = null;
@@ -2814,7 +2819,7 @@ function vrEquip(type) {
     it.pickT = 1;
   }
 }
-const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, sfx, sun, grabber, chunks: () => dismember.chunks,
+const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, sfx, sun, grabber, nades, chunks: () => dismember.chunks,
   resetWorld: () => resetWorld(),
   // a headset draws everything twice at 72fps+: no shadow pass (a third draw of the world), and
   // nothing past 80 m (it's in the fog anyway)
@@ -3150,10 +3155,8 @@ function frame() {
   camera.getWorldPosition(_bloodEye);
   blood.floor.view = bloodView;
   bloodView.far = vr.on ? 25 : 45;
-  blood.floor.uploads = vr.on ? 2 : 6;
-  blood.floor.upRate = vr.on ? 1 / 12 : 1 / 30;
-  blood.floor.maxShown = vr.on ? 8 : Infinity;
-  blood.floor.ppm = vr.on ? 40 : 64;
+  // (a headset: only the nearest few stained surfaces are drawn at all)
+  blood.floor.maxShown = vr.on ? 10 : Infinity;
   blood.update(dt);
   debris.update(dt, focusPos());
   litter.update(dt);

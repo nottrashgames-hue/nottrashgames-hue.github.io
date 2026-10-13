@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { SCHEMA, settings, setSetting } from './settings.js';
+import { INKS, shade } from './inks.js';
+import { THROWABLES, FUSE } from './throwables.js';
 import { poseArm as solveArm } from './gun.js';
 import { GRIP_TILT } from './gunmodel.js';
 import { curl, armUp } from './melee.js';
@@ -7,6 +9,7 @@ import { sweep, partNear } from './strike.js';
 import { pullPart } from './grabbing.js';
 import { sawStep } from './saw.js';
 import { chopPush } from './chop.js';
+import { Scanner } from './scanner.js';
 
 /*
   WebXR: your head is the camera, your controllers drive the body's arms (two-bone IK onto the
@@ -122,10 +125,21 @@ export const WHEEL_PAGES = [
     { type: 'shotgun', name: 'Shotgun' },
     { type: 'sniper', name: 'Sniper' },
   ] },
+  { name: 'THROW', items: [
+    { type: null, name: 'Hands' },
+    { type: 'nade:grenade', name: 'Grenade' },
+  ] },
 ];
 
 const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _p = V(), _q = Q(), _s = V(), _v = V(), _w = V();
 const _pole = V(), _rx = new THREE.Matrix4();
+// a grenade in the palm: its top toward the thumb, the pin's ring out where the other hand can reach it
+// (the same lean as a melee weapon's shaft; the right hand's keeps the grenade's -x - its ring - to
+// the left, toward the other hand, the left hand's mirrors it)
+// (the grenade's axes in the hand's frame: its x - away from the ring - up the hand, its top (+y) by
+// the thumb, its z - away from the spoon - out of the palm)
+const NADE_Q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(V(0, 1, 0), V(0, 0, 1), V(1, 0, 0)));
+const NADE_QL = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(V(0, 1, 0), V(0, 0, -1), V(-1, 0, 0)));
 
 export class VRMode {
   /** ctx: { renderer, scene, camera, hero, actors, equip(type), sfx } */
@@ -175,6 +189,7 @@ export class VRMode {
       });
     }
     this.hook = (h, dt) => this.poseArms(h, dt);
+    this.scanner = new Scanner(this);
     xr.addEventListener('sessionstart', () => this.enter());
     xr.addEventListener('sessionend', () => this.exit());
     this.button();
@@ -238,6 +253,7 @@ export class VRMode {
 
   exit() {
     this.on = false;
+    this.dropNade();
     this.camera.removeFromParent();
     this.rig.removeFromParent();
     this.camera.near = 0.1;
@@ -252,6 +268,7 @@ export class VRMode {
     if (this.scopeGun?.userData_lens) this.scopeGun.userData_lens.visible = false;
     this.scopeGun = null;
     this.spawner?.close();
+    this.scanner.close();
     // the arms back to whatever's held
     const A = this.hero, g = A.gunHeld;
     if (g) A.hero.armHook = (h, dt) => g.poseHeld(h, dt); else armUp(A);
@@ -309,7 +326,7 @@ export class VRMode {
     });
   }
 
-  uiOpen() { return !!(this.menu?.visible || this.wheel?.visible || this.spawner?.open); }
+  uiOpen() { return !!(this.menu?.visible || this.wheel?.visible || this.spawner?.open || this.scanner?.blocking()); }
   pad(hand) { return this.hands[hand]?.src?.gamepad || null; }
   buzz(hand, v, ms) { try { this.pad(hand)?.hapticActuators?.[0]?.pulse?.(v, ms); } catch (e) { /* no rumble */ } }
   btnDown(hand, i) { return !!this.pad(hand)?.buttons[i]?.pressed; }
@@ -332,12 +349,11 @@ export class VRMode {
   /** Start of the frame: sticks and buttons. */
   input() {
     const L = this.pad('left'), R = this.pad('right');
-    // walk: left stick, relative to where you're looking (click it to run)
+    // walk: left stick, relative to where you're looking (pushed all the way: run; clicking it is the scanner)
     const lx = L?.axes[2] || 0, ly = L?.axes[3] || 0;
     const dz = (v) => (Math.abs(v) < 0.15 ? 0 : v);
     this.move.x = dz(lx); this.move.y = -dz(ly);
-    if (this.edge('left', 3)) this.run = !this.run;
-    if (Math.hypot(lx, ly) < 0.2) this.run = false;
+    this.run = Math.hypot(lx, ly) > 0.95;
     // snap turn: right stick, round the head
     const rx = R?.axes[2] || 0;
     if (Math.abs(rx) > 0.7 && !this.turnLatch) { this.turnLatch = true; this.turn(rx > 0 ? -TURN : TURN); }
@@ -366,6 +382,7 @@ export class VRMode {
     for (let i = 6; i < lb; i++) if (this.edge('left', i)) menuBtn = true;
     if (menuBtn) { this.spawner?.close(); this.toggleMenu(); }
     if (this.menu?.visible) this.updateMenu();
+    this.scanner.input();
   }
 
   /**
@@ -426,6 +443,7 @@ export class VRMode {
   frame() {
     const h = this.hero.hero;
     this.place(h);
+    this.scanner.frame();
     h.head.visible = false;
     this.hideBody(true);
     this.armLength(ARM, true); // (the wardrobe can rebuild sleeves: keep them stretched too - as far as each arm reached)
@@ -544,11 +562,99 @@ export class VRMode {
     const was = _w.copy(P);
     P.copy(PALM).multiplyScalar(handK(h)).applyQuaternion(_q).add(_p);
     if (dt > 0) pv.lerp(was.sub(P).multiplyScalar(-1 / dt), 0.5);
+    // a grenade: held in this hand, or this hand on its pin
+    if (this.nade && this.nadeHand(hand, a, _q, dt, _p, h)) return;
     // squeeze: take hold of whatever the palm is on; let go to drop (or throw) it
     if (this.edge(hand, 1) && !this.held[hand] && !this.uiOpen()) this.grab(hand, h.arms.indexOf(a));
     if (this.held[hand] && !this.btnDown(hand, 1)) this.letGo(hand, true);
     if (this.held[hand]) this.holding(hand, dt);
     curl(a, this.held[hand] ? 1.25 : 0.25 + 1.25 * Math.max(this.btnVal(hand, 1), this.btnVal(hand, 0) * 0.7));
+  }
+
+  // ---- a grenade (the wheel's THROW page): one hand holds it, the other pulls the pin ----
+  /** A grenade of `kind` into the hand (the right one). */
+  holdNade(kind, hand = 'right') {
+    this.dropNade();
+    const mesh = THROWABLES[kind].build();
+    this.scene.add(mesh);
+    this.nade = { kind, mesh, hand, cook: -1, pin: null, pinBy: null, gripped: false };
+    this.buzz(hand, 0.3, 30);
+  }
+  /** Put away (not lit) - or, lit, let fall where it is: it still goes off. */
+  dropNade() {
+    const N = this.nade;
+    if (!N) return;
+    this.nade = null;
+    N.mesh.removeFromParent();
+    if (N.pin) this.nades?.bit(N.pin, V());
+    if (N.cook >= 0) this.nades?.launch(N.kind, this.hero, N.mesh.position.clone(), V(0, 0.3, 0), N.cook);
+  }
+  /**
+   * This frame's hand `hand` (pose q, palm this.palm[hand]) with a grenade about: holding it, on
+   * its pin, or reaching for the pin. True when the hand's taken care of (no grabbing).
+   */
+  nadeHand(hand, a, q, dt, wrist, h) {
+    const N = this.nade, P = this.palm[hand], NS = this.nades;
+    if (hand === N.hand) {
+      // in the hand's own frame (fingers down -y, the palm toward +x on the right, the thumb +z):
+      // the ball against the palm where a handle would be, its top up by the thumb, the spoon on
+      // the palm, the ring out past the fingertips for the other hand to reach
+      const k = handK(h), sx = hand === 'left' ? -1 : 1;
+      N.mesh.quaternion.copy(q).multiply(hand === 'left' ? NADE_QL : NADE_Q);
+      N.mesh.position.copy(wrist).add(_v.set(sx * 0.048 * k, -0.078 * k, 0).applyQuaternion(q))
+        .sub(_w.set(0, N.mesh.userData.mid ?? 0.035, 0).applyQuaternion(N.mesh.quaternion));
+      N.mesh.updateMatrixWorld(true);
+      curl(a, 0.85);
+      const grip = this.btnDown(hand, 1);
+      if (grip) N.gripped = true;
+      if (N.cook >= 0) {
+        N.cook += dt;
+        // held too long: it goes off in your hand
+        if (N.cook >= FUSE[N.kind]) {
+          this.nade = null; N.mesh.removeFromParent();
+          if (N.pin) NS?.bit(N.pin, V());
+          NS?.launch(N.kind, this.hero, N.mesh.position.clone(), V(), FUSE[N.kind]);
+          return true;
+        }
+        // the grip let go: thrown, at the hand's speed (the spoon flies off)
+        if (N.gripped && !grip) {
+          this.nade = null; N.mesh.removeFromParent();
+          if (N.pin) NS?.bit(N.pin, V());
+          NS?.launch(N.kind, this.hero, N.mesh.position.clone(), _w.copy(this.palmVel[hand]).multiplyScalar(1.3), N.cook);
+          this.sfx?.('whoosh', 0.4, { rate: 0.85, vary: 0.1 });
+          this.buzz(hand, 0.4, 30);
+        }
+      }
+      return true;
+    }
+    // the other hand, on the pin: it comes with the hand until you let go of it
+    if (N.pinBy === hand) {
+      // (the ring between the fingers, where the fist closes)
+      const sx = hand === 'left' ? -1 : 1, k = handK(h);
+      N.pin.position.copy(wrist).add(_v.set(sx * 0.03 * k, -0.075 * k, 0).applyQuaternion(q));
+      N.pin.quaternion.copy(q).multiply(hand === 'left' ? NADE_QL : NADE_Q);
+      curl(a, 0.9);
+      if (!this.btnDown(hand, 1)) { NS?.bit(N.pin, this.palmVel[hand]); N.pin = null; N.pinBy = null; }
+      return true;
+    }
+    // reaching for the ring: squeeze on it and the pin's out, the fuse lit
+    if (N.cook < 0 && N.mesh.userData.ring) {
+      const ring = N.mesh.localToWorld(_w.copy(N.mesh.userData.ring));
+      const d = ring.distanceTo(P);
+      if (d < 0.1 && !N.near) { N.near = true; this.buzz(hand, 0.15, 15); }
+      else if (d > 0.13) N.near = false;
+      if (d < 0.1 && this.edge(hand, 1)) {
+        const pin = N.mesh.userData.pin;
+        pin.removeFromParent();
+        this.scene.add(pin);
+        N.pin = pin; N.pinBy = hand; N.cook = 0;
+        this.sfx?.('pin', 0.6, { vary: 0.1 });
+        this.buzz(hand, 0.7, 50); this.buzz(N.hand, 0.4, 40);
+        curl(a, 0.9);
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---- bare hands: picking up people and pieces of them ----
@@ -950,7 +1056,7 @@ export class VRMode {
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false, fog: false }));
     mesh.renderOrder = 999;
     mesh.frustumCulled = false;
-    mesh.userData = { c, tex, hover: -2, n: this.MENU.length, page: this.menuPage };
+    mesh.userData = { c, tex, hover: -2, n: this.MENU.length, page: this.menuPage, tab: this.setTab };
     // a pointer line from whichever hand is aiming at it
     const lineMat = new THREE.LineBasicMaterial({ color: 0xffd65a, transparent: true, opacity: 0.8, depthTest: false, fog: false });
     this.laser = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(), V(0, 0, -1)]), lineMat);
@@ -964,15 +1070,27 @@ export class VRMode {
   // buttons, in canvas pixels
   get MENU() {
     if (this.menuPage === 'settings') {
-      // every on/off setting worth having in a headset, two columns; a click flips it (the menu stays open)
-      const items = SCHEMA.filter((c) => c.name === 'Gore' || c.name === 'Graphics')
-        .flatMap((c) => c.items).filter((it) => !it.type);
-      const rows = [{ label: 'Back', act: () => this.openPage('main'), x: 30, y: 30, w: 964, h: 80, keep: true }];
-      items.forEach((it, i) => rows.push({
-        label: it.label, k: it.k, keep: true,
-        x: 30 + (i % 2) * 492, y: 130 + Math.floor(i / 2) * 82, w: 472, h: 70,
-        act: () => setSetting(it.k, !settings[it.k]),
+      // Back, then a tab per section (Gore, Graphics, Audio); the tab's settings below it:
+      // on/off switches two to a row, sliders (volumes, the blood colour) a row each
+      const tab = SCHEMA.find((c) => c.name === this.setTab) || SCHEMA[0];
+      const rows = [{ label: 'Back', act: () => this.openPage('main'), x: 30, y: 30, w: 200, h: 80, keep: true }];
+      const tw = (964 - 220 - 2 * 12) / SCHEMA.length;
+      SCHEMA.forEach((c, i) => rows.push({
+        label: c.name, tab: true, on: c === tab, keep: true,
+        x: 250 + i * (tw + 12), y: 30, w: tw, h: 80,
+        act: () => { if (c !== tab) { this.setTab = c.name; this.openPage('settings'); } },
       }));
+      let y = 130, col = 0;
+      for (const it of tab.items) {
+        if (it.type === 'range' || it.type === 'select') {
+          if (col) { y += 82; col = 0; }
+          rows.push({ label: it.label, k: it.k, it, slider: true, keep: true, x: 30, y, w: 964, h: 70, act: () => {} });
+          y += 82;
+        } else {
+          rows.push({ label: it.label, k: it.k, keep: true, x: 30 + col * 492, y, w: 472, h: 70, act: () => setSetting(it.k, !settings[it.k]) });
+          if (col) { y += 82; col = 0; } else col = 1;
+        }
+      }
       return rows;
     }
     return [
@@ -982,6 +1100,51 @@ export class VRMode {
       { label: 'Calibrate height', act: () => this.calibrate() },
       ...(this.backToMenu ? [{ label: 'Back to menu', act: () => this.backToMenu() }] : []),
     ].map((b, i) => ({ ...b, x: 30, y: 40 + i * 120, w: 452, h: 100 }));
+  }
+  /** A slider row's track, in canvas pixels. */
+  sliderTrack(b) { return { x0: b.x + 360, x1: b.x + b.w - 130 }; }
+  /** The pointer at canvas x on slider row b: its setting to the value there. */
+  slide(b, px) {
+    const { x0, x1 } = this.sliderTrack(b), it = b.it;
+    const f = Math.min(1, Math.max(0, (px - x0) / (x1 - x0)));
+    if (it.type === 'select') {
+      const n = it.opts.length;
+      setSetting(it.k, it.opts[Math.min(n - 1, Math.floor(f * n))][0]);
+    } else {
+      const v = Math.round((it.min + f * (it.max - it.min)) / it.step) * it.step;
+      setSetting(it.k, +v.toFixed(4));
+    }
+  }
+  /** Draw slider row b's track and value (a row of colour swatches for a select: the blood colour). */
+  drawSlider(g, b, hov) {
+    const { x0, x1 } = this.sliderTrack(b), it = b.it, cy = b.y + b.h / 2;
+    let text;
+    if (it.type === 'select') {
+      const n = it.opts.length, w = (x1 - x0) / n, cur = it.opts.findIndex(([k]) => k === settings[it.k]);
+      it.opts.forEach(([k], i) => {
+        const ink = INKS.findIndex((x) => x.name === k);
+        // (natural: everyone bleeds their own - shown as a split of red and the rest)
+        const [r, gg, bb] = shade(ink < 0 ? 0 : ink, 0.62, 0.03, 0.035);
+        g.fillStyle = `rgb(${r * 255 | 0},${gg * 255 | 0},${bb * 255 | 0})`;
+        g.beginPath(); g.roundRect(x0 + i * w + 3, cy - 20, w - 6, 40, 8); g.fill();
+        if (ink < 0) { g.fillStyle = '#fff'; g.font = 'bold 20px system-ui, sans-serif'; g.textAlign = 'center'; g.fillText('N', x0 + i * w + w / 2, cy + 1); }
+        if (i === cur) { g.strokeStyle = hov ? '#15130c' : '#fff'; g.lineWidth = 4; g.beginPath(); g.roundRect(x0 + i * w, cy - 24, w, 48, 10); g.stroke(); }
+      });
+      text = it.opts[cur]?.[1] ?? '';
+    } else {
+      const f = (settings[it.k] - it.min) / (it.max - it.min);
+      g.fillStyle = hov ? 'rgba(0,0,0,0.25)' : 'rgba(255,255,255,0.18)';
+      g.beginPath(); g.roundRect(x0, cy - 6, x1 - x0, 12, 6); g.fill();
+      g.fillStyle = hov ? '#15130c' : '#4fbf6a';
+      g.beginPath(); g.roundRect(x0, cy - 6, Math.max(12, (x1 - x0) * f), 12, 6); g.fill();
+      g.fillStyle = hov ? '#15130c' : '#fff';
+      g.beginPath(); g.arc(x0 + (x1 - x0) * f, cy, 16, 0, Math.PI * 2); g.fill();
+      text = it.fmt ? it.fmt(settings[it.k]) : String(settings[it.k]);
+    }
+    g.fillStyle = hov ? '#15130c' : '#f2f0ea';
+    g.font = 'bold 24px system-ui, sans-serif';
+    g.textAlign = 'right';
+    g.fillText(text, b.x + b.w - 16, cy + 1);
   }
   /** Switch the menu to another page, in the same spot. */
   openPage(page) {
@@ -998,12 +1161,19 @@ export class VRMode {
     g.fillStyle = 'rgba(18,18,22,0.85)';
     g.beginPath(); g.roundRect(0, 0, c.width, c.height, 28); g.fill();
     this.MENU.forEach((b, i) => {
-      const on = b.k ? !!settings[b.k] : null;
-      g.fillStyle = i === hover ? '#ffd65a' : on === false ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.1)';
+      const on = b.k && !b.slider ? !!settings[b.k] : null;
+      g.fillStyle = i === hover ? '#ffd65a' : b.tab && b.on ? 'rgba(255,214,90,0.35)' : on === false ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.1)';
       g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 18); g.fill();
       g.fillStyle = i === hover ? '#15130c' : on === false ? '#8d8a84' : '#f2f0ea';
       g.textBaseline = 'middle';
-      if (b.k) {
+      if (b.slider) {
+        g.font = 'bold 26px system-ui, sans-serif';
+        g.textAlign = 'left';
+        let t = b.label;
+        while (g.measureText(t).width > 330 && t.length > 4) t = t.slice(0, -2) + '…';
+        g.fillText(t, b.x + 18, b.y + b.h / 2 + 1);
+        this.drawSlider(g, b, i === hover);
+      } else if (b.k) {
         // a setting: its name, and an on/off pill at the right
         g.font = 'bold 26px system-ui, sans-serif';
         g.textAlign = 'left';
@@ -1016,7 +1186,7 @@ export class VRMode {
         g.fillStyle = '#fff';
         g.beginPath(); g.arc(on ? px + 60 : px + 18, py + 18, 14, 0, Math.PI * 2); g.fill();
       } else {
-        g.font = 'bold 42px system-ui, sans-serif';
+        g.font = `bold ${b.tab || b.label === 'Back' && b.w < 300 ? 34 : 42}px system-ui, sans-serif`;
         g.textAlign = 'center';
         g.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
       }
@@ -1028,7 +1198,7 @@ export class VRMode {
     if (!keepPage) this.menuPage = 'main';
     // (built for a different set of buttons - Back to menu comes and goes with the map, the
     // settings page is its own size: again, to fit)
-    if (this.menu && (this.menu.userData.n !== this.MENU.length || this.menu.userData.page !== this.menuPage)) {
+    if (this.menu && (this.menu.userData.n !== this.MENU.length || this.menu.userData.page !== this.menuPage || this.menu.userData.tab !== this.setTab)) {
       this.menu.removeFromParent(); this.menu.geometry.dispose(); this.menu.material.map.dispose(); this.menu.material.dispose();
       this.laser.removeFromParent(); this.laser.geometry.dispose(); this.laser.material.dispose();
       this.menu = null;
@@ -1068,6 +1238,24 @@ export class VRMode {
       if (i >= 0) hover = i;
       const down = this.btnDown(hand, 0), was = this.menuTrig[hand];
       this.menuTrig[hand] = down;
+      // a slider: pressed on it, it follows the pointer for as long as the trigger is held
+      if (down && !was && i >= 0 && this.MENU[i].slider) this.sliding = this.MENU[i].k;
+      if (!down) this.sliding = null;
+      if (this.sliding) {
+        const rows = this.MENU, b = rows.find((r) => r.k === this.sliding && r.slider);
+        if (b) {
+          const before = settings[b.k];
+          this.slide(b, px);
+          if (settings[b.k] !== before) { this.buzz(hand, 0.12, 12); M.userData.hover = -2; }
+        }
+        hover = rows.indexOf(b);
+        if (!was) this.buzz(hand, 0.5, 50);
+        this.menuHover = hover;
+        this.drawMenu(hover);
+        this.laser.visible = true;
+        this.laser.position.copy(slot.ray.position); this.laser.quaternion.copy(slot.ray.quaternion); this.laser.scale.set(1, 1, hit.distance);
+        return;
+      }
       if (down && !was && i >= 0) {
         this.buzz(hand, 0.5, 50);
         const b = this.MENU[i];
@@ -1150,6 +1338,7 @@ export class VRMode {
     const A = this.hero;
     if (A.gunHeld) return A.gunHeld.type;
     if (A.meleeHeld) return A.meleeHeld.type;
+    if (this.nade) return 'nade:' + this.nade.kind;
     return null;
   }
   openWheel() {

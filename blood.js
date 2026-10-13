@@ -246,6 +246,8 @@ export class BloodSystem {
     const P = this.p, cols = this.colliders, cars = this.cars;
     this.bodyCaps(P);
     let paint = 10; // (people splashed this frame: a stain paint each)
+    // full splats this frame (GPU-painted, cheap): only a truly absurd gush falls back to plain drops
+    let splats = 400;
     let n = 0;
     for (let i = 0; i < P.length; i++) {
       const p = P[i];
@@ -284,7 +286,7 @@ export class BloodSystem {
         this.landed(p, hit.point);
         this.floor.ink = p.ink; this.floor.by(p.src);
         if (p.hue != null) setPrismHue(p.hue);
-        if (p.heavy && p.r < 0.006) this.floor.drop(hit.surf, hit.point, p.vel, p.r);
+        if ((p.heavy && p.r < 0.006) || splats-- <= 0) this.floor.drop(hit.surf, hit.point, p.vel, Math.max(p.r, size * 0.45));
         else this.floor.splat(hit.surf, hit.point, p.vel, size, p.heavy ? 0.9 : 0.6);
         continue;
       }
@@ -294,7 +296,7 @@ export class BloodSystem {
         const S = this.floor.floorTile(p.pos.x, p.pos.z);
         this.floor.ink = p.ink; this.floor.by(p.src);
         if (p.hue != null) setPrismHue(p.hue);
-        if (p.heavy && p.r < 0.006) this.floor.drop(S, p.pos, p.vel, p.r);
+        if ((p.heavy && p.r < 0.006) || splats-- <= 0) this.floor.drop(S, p.pos, p.vel, Math.max(p.r, size * 0.45));
         else this.floor.splat(S, p.pos, p.vel, size, p.heavy ? 0.9 : 0.6);
         continue; // landed
       }

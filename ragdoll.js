@@ -439,6 +439,28 @@ export class Ragdoll {
       p.touch = touch;
     }
   }
+  /**
+   * Contact impulse (N s, the last physics step) pressing on each part from anything that isn't
+   * this body - the ground, a car, someone standing on it: fn(part, impulse).
+   */
+  pressure(fn) {
+    const w = this.world;
+    const own = this._own ||= new Set();
+    own.clear();
+    for (const p of this.list) own.add(p.body.handle);
+    for (const p of this.list) {
+      if (p.gone) continue;
+      let J = 0;
+      for (const c of p.cols) {
+        w.contactPairsWith(c, (o) => {
+          const b = o.parent();
+          if (b && own.has(b.handle)) return;
+          w.contactPair(c, o, (m) => { for (let i = 0, n = m.numContacts(); i < n; i++) J += m.contactImpulse(i); });
+        });
+      }
+      if (J > 0) fn(p, J);
+    }
+  }
   /** Height of the level surface below (x, fromY, z). */
   groundY(x, z, fromY = 3) {
     this._ray ||= new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });

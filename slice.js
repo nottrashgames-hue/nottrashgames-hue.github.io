@@ -92,7 +92,7 @@ function vnoise(x, y, s) {
  * rougher ripple and a fine jaggedness, `amp` metres at most. A function of where on the plane a
  * point is, so both halves - their edges and their faces - tear along exactly the same line.
  */
-export function makeTear(plane, amp, seed = (Math.random() * 1e6) | 0) {
+export function makeTear(plane, amp, seed = (Math.random() * 1e6) | 0, blast = false) {
   const n = plane.normal, o = plane.coplanarPoint(V());
   const u = V().crossVectors(n, Math.abs(n.y) < 0.9 ? V(0, 1, 0) : V(1, 0, 0)).normalize();
   const w = V().crossVectors(n, u);
@@ -100,6 +100,14 @@ export function makeTear(plane, amp, seed = (Math.random() * 1e6) | 0) {
   const off = (p) => {
     q.subVectors(p, o);
     const x = q.dot(u), y = q.dot(w);
+    // blown off: an uneven, ragged line - broad dips and rises round the skull, lumpy in
+    // between, a crumbly grit on top (rough, torn - no spikes, no clean line)
+    if (blast) {
+      const dip = 2 * vnoise(x / 0.06, y / 0.06, seed) - 1;
+      const lump = 2 * vnoise(x / 0.022, y / 0.022, seed + 1) - 1;
+      const grit = 2 * vnoise(x / 0.008, y / 0.008, seed + 2) - 1;
+      return amp * (0.55 * dip + 0.3 * lump + 0.15 * grit);
+    }
     return amp * (0.55 * vnoise(x / 0.045, y / 0.045, seed) + 0.3 * vnoise(x / 0.016, y / 0.016, seed + 1)
       + 0.2 * vnoise(x / 0.006, y / 0.006, seed + 2));
   };
@@ -108,7 +116,7 @@ export function makeTear(plane, amp, seed = (Math.random() * 1e6) | 0) {
   return { plane, n, off, band: amp * 2.6, amp };
 }
 // how deep (m) the tear runs either side of the plane
-const TEAR = { limb: 0.0065, torso: 0.011, loose: 0.0055 };
+const TEAR = { limb: 0.0065, torso: 0.011, loose: 0.0055, blast: 0.016 };
 
 export function sliceGeometry(geo, plane, at = 'position', tear = null, force = null) {
   const src = geo.index ? geo.toNonIndexed() : geo;
@@ -1019,7 +1027,8 @@ export class Dismember {
     const gInv = new THREE.Matrix4().copy(g.matrixWorld).invert();
     // one tear for everything this cut goes through, in the part's frame; every layer's
     // outline gathered there, for the one solid face at the end
-    const Tc = makeTear(plane, S.torso ? TEAR.torso : TEAR.limb, seed);
+    // (a gib - a head blown open - is ragged all round, not cut)
+    const Tc = gib ? makeTear(plane, TEAR.blast, seed, true) : makeTear(plane, S.torso ? TEAR.torso : TEAR.limb, seed);
     const outlines = [];
     const gather = (loops, rel) => { for (const L of loops) outlines.push(L.map((p) => p.clone().applyMatrix4(rel))); };
     // (a stump cut again: its old face is past this cut, and goes with the piece)
@@ -1181,6 +1190,7 @@ export class Dismember {
     actor.wounds?.chop(part, point, normalW.clone(), vel, V(0, 1, 0).applyQuaternion(gq), 1.6);
     // (a puppet's own client decides what it does to them)
     if (!puppet) {
+      if (kind === 'head' && actor.organs) actor.organs.brainDeath = true;
       if (kind === 'head' || S.torso) actor.organs?.die();
       else if (!actor.brain.dead) actor.onPain?.(part, 'lost', 3);
       if (kind === 'thigh' || kind === 'shin' || S.torso) actor.crippled = true;

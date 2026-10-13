@@ -281,6 +281,20 @@ export class StainVol {
     return ch === 0 || ch === 3 ? v * (1 - this.dry.dryness(x, y, z)) : v;
   }
 
+  /** Wipe the blood only (wet, soaked, dried and anyone else's) - wounds and bruises stay. */
+  clearBlood() {
+    if (this.data) {
+      const D = this.data;
+      for (let i = 0; i < D.length; i += 4) { D[i] = 0; D[i + 3] = 0; }
+      this.tex.needsUpdate = true;
+    }
+    if (this.fo) { this.fo.fill(0); this.foTex.needsUpdate = true; }
+    this.soaking = 0;
+    this.dirty = false;
+    this.wb = null;
+    this.dry.clear();
+  }
+
   /** Wipe everything (respawn). */
   clear() {
     if (this.data) { this.data.fill(0); this.tex.needsUpdate = true; }

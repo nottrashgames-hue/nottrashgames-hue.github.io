@@ -605,7 +605,7 @@ export class Vehicles {
         // struck: legs taken out at bumper height, thrown with the car
         const part = Math.random() < 0.5 ? 'thighL' : 'thighR';
         const sev = clamp(rel / 9, 0.3, 2.2);
-        a.struck(part, at, cv.clone().setY(0), n, { kind: 'blunt', mass: 22, sev, ref: 9, maxImp: 60 + rel * 30, dent: 0.35 }, c.driver || c.stand);
+        a.struck(part, at, cv.clone().setY(0), n, { kind: 'blunt', mass: 22, sev, ref: 9, maxImp: 60 + rel * 30, dent: 0.35, label: 'Vehicle' }, c.driver || c.stand);
         if (a.mode === 'ragdoll') {
           for (const p of a.rd.list) {
             const lv = p.body.linvel();

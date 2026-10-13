@@ -1,5 +1,6 @@
 import { settings } from './settings.js';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { poseArm } from './gun.js';
 import { sweep } from './strike.js';
 import { bodyFrame, curl } from './melee.js';
@@ -154,6 +155,90 @@ function buildFrag() {
   return g;
 }
 
+/**
+ * The grenade: a round olive body with a yellow band, the fuse head on top, the spoon down its
+ * side and the pin through it, its ring out to one side. userData.pin / spoon: the bits that
+ * come off (the pin when it's pulled, the spoon when it's let go of); userData.ring: where the
+ * ring is, in the grenade's frame (what a hand takes hold of to pull it).
+ */
+function buildGrenadeLowPoly() {
+  const m = mats(), g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.033, 16, 12), m.frag);
+  body.scale.set(1, 1.08, 1);
+  body.position.y = 0.04;
+  const band = new THREE.Mesh(new THREE.CylinderGeometry(0.0335, 0.0335, 0.006, 16, 1, true), m.band);
+  band.position.y = 0.052;
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.014, 0.018, 10), m.metal);
+  neck.position.y = 0.079;
+  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.012, 10), m.metal);
+  head.position.y = 0.093;
+  // the spoon: from the head, down the side
+  const spoon = new THREE.Group();
+  const top = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.004, 0.014), m.metal);
+  top.position.set(0.012, 0, 0);
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.06, 0.012), m.metal);
+  arm.position.set(0.026, -0.028, 0);
+  arm.rotation.z = 0.12;
+  spoon.add(top, arm);
+  spoon.position.set(0, 0.1, 0);
+  // the pin across the head, the ring out on the far side
+  const pin = new THREE.Group();
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.0013, 0.0013, 0.034, 6), m.metal);
+  rod.rotation.x = Math.PI / 2;
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.0022, 6, 16), m.metal);
+  ring.position.set(0, 0, -0.03);
+  ring.rotation.y = Math.PI / 2;
+  pin.add(rod, ring);
+  pin.position.set(-0.004, 0.09, 0);
+  g.add(body, band, neck, head, spoon, pin);
+  g.traverse((c) => { if (c.isMesh) c.castShadow = true; });
+  g.userData.len = 0.11;
+  g.userData.mid = 0.04;
+  g.userData.pin = pin;
+  g.userData.spoon = spoon;
+  g.userData.ring = V(-0.004, 0.09, -0.03);
+  return g;
+}
+
+// the grenade's models (grenade.glb: body, fuse head, spoon; grenadepin.glb: the pin and its ring),
+// loaded once - until they're in, grenades are the simple built one above
+let NADE_SRC = null, PIN_SRC = null;
+const NADE_K = 0.027;   // grenade.glb units -> m (a body 9 cm across: a good fistful)
+const PIN_K = 0.0085;   // grenadepin.glb units -> m (a ring 3.4 cm across)
+{
+  const L = new GLTFLoader();
+  L.load('grenade.glb', (g) => { NADE_SRC = g.scene; }, undefined, (e) => console.warn('grenade.glb failed to load', e));
+  L.load('grenadepin.glb', (g) => { PIN_SRC = g.scene; }, undefined, (e) => console.warn('grenadepin.glb failed to load', e));
+}
+/** The grenade from its models: sitting on its base at the origin, top up (+Y). Same userData as the built one. */
+function buildGrenade() {
+  if (!NADE_SRC || !PIN_SRC) return buildGrenadeLowPoly();
+  const g = new THREE.Group();
+  const body = NADE_SRC.clone(true);
+  body.scale.setScalar(NADE_K);
+  body.position.y = 1.65 * NADE_K; // (the model's centre is the ball's: its base on the ground)
+  g.add(body);
+  // the spoon (Cylinder.001): its own piece, it flies off when the grenade leaves the hand
+  const spoonSrc = body.getObjectByName('Cylinder.001');
+  const spoon = new THREE.Group();
+  g.add(spoon);
+  if (spoonSrc) { body.updateMatrixWorld(true); spoon.attach(spoonSrc); }
+  // the pin: through the fuse head side to side, the ring out on the -x side
+  const pin = PIN_SRC.clone(true);
+  pin.scale.setScalar(PIN_K);
+  pin.rotation.y = Math.PI / 2; // (its rod runs along its +z: now along +x)
+  const headY = (1.65 + 2.29) * NADE_K;
+  pin.position.set(-4.12 * PIN_K, headY, 0); // (the rod's middle on the head)
+  g.add(pin);
+  g.traverse((c) => { if (c.isMesh) c.castShadow = true; });
+  g.userData.len = 0.12;
+  g.userData.mid = 1.65 * NADE_K; // (the ball's centre: what sits in the fist)
+  g.userData.pin = pin;
+  g.userData.spoon = spoon;
+  g.userData.ring = pin.position.clone();
+  return g;
+}
+
 // ---- launched (the launchers in gun.js): pointed along +Y, they fly nose first ----
 function buildRocket() {
   const g = new THREE.Group();
@@ -195,13 +280,16 @@ export const THROWABLES = {
   gas: { name: 'Gas Grenade', build: buildGas },
   molotov: { name: 'Molotov', build: buildMolotov },
   frag: { name: 'Frag Grenade', build: buildFrag },
+  // pull the pin and the fuse is lit (cook it in your hand - not for too long): a much bigger
+  // blast than a frag, that tears limbs off far more often
+  grenade: { name: 'Grenade', build: buildGrenade, cook: true },
   dodgeball: { name: 'Dodgeball', build: buildDodgeball, noPin: true },
   banana: { name: 'Banana Peel', build: buildBanana, noPin: true },
   timebomb: { name: 'Time Bomb', build: buildTimeBomb },
   airstrike: { name: 'Airstrike', build: buildFlare },
 };
 // how long after the throw each goes off by itself (molotov: on impact, never by time)
-const FUSE = { gas: 1.6, frag: 3.2, timebomb: 8, airstrike: 2.2, dodgeball: 8, banana: 6 };
+export const FUSE = { grenade: 4.5, gas: 1.6, frag: 3.2, timebomb: 8, airstrike: 2.2, dodgeball: 8, banana: 6 };
 const STRIKE_CD = 60; // s between airstrikes
 const STRIKE_N = 7, STRIKE_LEN = 26; // bombs along the run, m of it
 
@@ -314,6 +402,43 @@ export class Throwables {
     this.nukeFlash = 0;
     this.sel = 'molotov';
     this.onPocket = null;
+    this.bits = []; // a pulled pin, a spoon flying off: falling, bouncing, then gone
+  }
+
+  /** Part of a model come off (a pin, a spoon): it falls from where it is, at velocity v. */
+  bit(o, v) {
+    if (!o) return;
+    o.updateWorldMatrix(true, false);
+    o.matrixWorld.decompose(_bp, _bq, _s);
+    o.removeFromParent();
+    o.position.copy(_bp); o.quaternion.copy(_bq);
+    this.ctx.scene.add(o);
+    this.bits.push({ o, v: v.clone(), w: V(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).multiplyScalar(14), t: 0 });
+  }
+  runBits(dt) {
+    const B = this.bits, cast = this.ctx.castSeg;
+    for (let i = B.length - 1; i >= 0; i--) {
+      const b = B[i], o = b.o;
+      b.t += dt;
+      if (b.t > 6) { o.removeFromParent(); B.splice(i, 1); continue; }
+      if (b.still) continue;
+      b.v.y -= G * dt;
+      const nx = o.position.clone().addScaledVector(b.v, dt);
+      const hit = cast(o.position, nx);
+      if (hit) {
+        o.position.copy(hit.point).y += 0.004;
+        if (b.v.y < -0.8) { b.v.y *= -0.3; b.v.x *= 0.5; b.v.z *= 0.5; b.w.multiplyScalar(0.5); }
+        else b.still = true;
+      } else o.position.copy(nx);
+      if (b.w.lengthSq() > 1e-4) o.quaternion.multiply(_bq.setFromAxisAngle(_bw.copy(b.w).normalize(), b.w.length() * dt));
+    }
+  }
+  /** A grenade's pin out of mesh (in a hand), dropping - the fuse is lit. */
+  pullPin(mesh, v = V()) {
+    const pin = mesh?.userData.pin;
+    if (!pin || !pin.parent) return;
+    this.bit(pin, v.clone().add(V(rnd(-0.3, 0.3), 0.6, rnd(-0.3, 0.3))));
+    this.ctx.sfx('pin', 0.55, { vary: 0.1 });
   }
 
   // ---------- your pocket ----------
@@ -367,19 +492,25 @@ export class Throwables {
 
   // ---------- throwing ----------
   /** Our own throw: it's ours to fly and set off. */
-  launch(kind, by, p, v) {
+  /** t0: how long its fuse has already been burning (a grenade cooked in the hand). */
+  launch(kind, by, p, v, t0 = 0) {
     if (kind === 'airstrike') { this.strikeCd = STRIKE_CD; this.onPocket?.(); }
     const id = (this.ctx.net?.id() || 'l') + ':' + ++this.seq;
-    this.spawn(kind, id, by, p, v, false);
+    this.spawn(kind, id, by, p, v, false, t0);
     this.ctx.net?.send({ a: 't', id, ty: kind, p: [p.x, p.y, p.z], v: [v.x, v.y, v.z] });
   }
-  spawn(kind, id, by, p, v, remote) {
+  spawn(kind, id, by, p, v, remote, t0 = 0) {
     const mesh = (THROWABLES[kind] || PROJECTILES[kind]).build();
     mesh.position.copy(p);
-    mesh.quaternion.setFromUnitVectors(UP, v.clone().normalize());
+    if (v.lengthSq() > 1e-6) mesh.quaternion.setFromUnitVectors(UP, v.clone().normalize());
     this.ctx.scene.add(mesh);
+    // a grenade in the air: its pin's long gone, the spoon flies off as it leaves the hand
+    if (THROWABLES[kind]?.cook) {
+      mesh.userData.pin?.removeFromParent();
+      this.bit(mesh.userData.spoon, v.clone().multiplyScalar(0.6).add(V(rnd(-1, 1), 1.5, rnd(-1, 1))));
+    }
     const spin = V(rnd(-1, 1), rnd(-0.3, 0.3), rnd(-1, 1)).normalize();
-    this.flying.push({ kind, id, by, p: p.clone(), v: v.clone(), mesh, spin, w: rnd(9, 14), t: 0, rest: false, remote, lastClank: 0 });
+    this.flying.push({ kind, id, by, p: p.clone(), v: v.clone(), mesh, spin, w: rnd(9, 14), t: t0, t0, rest: false, remote, lastClank: 0 });
   }
 
   /** A message from someone else's copy. */
@@ -438,6 +569,9 @@ export class Throwables {
     } else if (kind === 'frag') {
       if (mesh) this.ctx.scene.remove(mesh);
       this.explode(p, by, mine);
+    } else if (kind === 'grenade') {
+      if (mesh) this.ctx.scene.remove(mesh);
+      this.explode(p, by, mine, 2, GRENADE);
     } else if (kind === 'molotov') {
       if (mesh) this.ctx.scene.remove(mesh);
       // the fire lands on whatever's under the splash
@@ -706,7 +840,8 @@ export class Throwables {
     }
   }
 
-  explode(p, by, mine, big = 1) {
+  /** X (optional): { dmg: how much harder it hits, rip: how much further limbs come off, frags } */
+  explode(p, by, mine, big = 1, X = null) {
     const { castSeg, actors } = this.ctx;
     const floor = castSeg(V(p.x, p.y + 0.2, p.z), V(p.x, p.y - 3, p.z));
     const c = p.clone(); c.y = (floor ? floor.point.y : p.y) + 0.12;
@@ -722,13 +857,15 @@ export class Throwables {
       const wall = castSeg(c, chest);
       const cover = wall && wall.point.distanceTo(chest) > 0.35 ? 0.25 : 1;
       const f = (1 - d / R) ** 1.5 * cover;
-      if (!A.remote) this.blastHit(A, c, f, d);
-      if (mine) this.shred(A, c, by, f, cover);
+      // (a grenade: the players are spared - only NPCs are hurt)
+      if (X?.spare && A.isPlayer) continue;
+      if (!A.remote) this.blastHit(A, c, X ? Math.min(1.2, f * X.dmg) : f, d);
+      if (mine) this.shred(A, c, by, f, cover, X);
     }
     // fragments flying everywhere else (real rounds: holes in walls, whoever's in the way)
-    if (mine && this.ctx.fragment) for (let k = 0; k < 14; k++) {
+    if (mine && this.ctx.fragment) for (let k = 0; k < (X?.frags || 14); k++) {
       const d = V(rnd(-1, 1), rnd(-0.05, 0.5), rnd(-1, 1)).normalize();
-      this.ctx.fragment(c.clone().addScaledVector(d, 0.05), d, by);
+      this.ctx.fragment(c.clone().addScaledVector(d, 0.05), d, by, !!X?.spare);
     }
   }
 
@@ -791,17 +928,19 @@ export class Throwables {
   }
 
   /** Thrower's copy: the fragments that find this person, and the limbs torn off close in. */
-  shred(A, c, by, f, cover) {
+  shred(A, c, by, f, cover, X = null) {
+    const rip = X?.rip || 1;
     if (A.god) return;
     const frag = this.ctx.fragment, sever = this.ctx.sever;
     if (frag && f > 0.02) {
-      const n = Math.round(clamp(f * 7 + (Math.random() < f * 3 ? 1 : 0), 0, 7));
+      const most = X ? 10 : 7;
+      const n = Math.round(clamp(f * most + (Math.random() < f * 3 ? 1 : 0), 0, most));
       const parts = Object.keys(A.groups);
       for (let k = 0; k < n; k++) {
         const g = A.groups[parts[(Math.random() * parts.length) | 0]];
         const at = g.getWorldPosition(V()).add(V(rnd(-0.08, 0.08), rnd(-0.12, 0.05), rnd(-0.08, 0.08)));
         const dir = at.sub(c).normalize();
-        frag(c.clone().addScaledVector(dir, 0.05), dir, by);
+        frag(c.clone().addScaledVector(dir, 0.05), dir, by, !!X?.spare);
       }
     }
     if (!sever || cover < 1 || !settings.dismember) return;
@@ -814,14 +953,14 @@ export class Throwables {
       g.updateWorldMatrix(true, false);
       const j = g.getWorldPosition(V());
       const dj = j.distanceTo(c);
-      const reach = part === 'spine' ? 0.7 : part === 'head' ? 1.3 : 2.1;
+      const reach = (part === 'spine' ? 0.7 : part === 'head' ? 1.3 : 2.1) * rip;
       const pr = clamp(1 - dj / reach, 0, 1) ** 1.2 * 0.95;
       if (Math.random() < pr) near.push({ part, j, dj, g });
     }
     near.sort((a, b) => a.dj - b.dj);
     let cuts = 0;
     for (const { part, j, g } of near) {
-      if (cuts >= 4) break;
+      if (cuts >= (X ? 6 : 4)) break;
       if (A.rd.parts[part]?.gone) continue;
       const axis = V(0, 1, 0).transformDirection(g.matrixWorld);
       axis.add(V(rnd(-0.3, 0.3), rnd(-0.3, 0.3), rnd(-0.3, 0.3))).normalize();
@@ -851,6 +990,7 @@ export class Throwables {
     this.runNukes(dt);
     this.runPeels(dt);
     this.runStrikes(dt);
+    this.runBits(dt);
     if (this.strikeCd > 0) {
       const was = Math.ceil(this.strikeCd);
       this.strikeCd = Math.max(0, this.strikeCd - dt);
@@ -914,7 +1054,7 @@ export class Throwables {
         const nx = f.p.clone().addScaledVector(f.v, h);
         const hit = castSeg(f.p, nx);
         // (a person in the way: not the thrower in the first instant)
-        const who = sweep(f.p, f.p, nx, nx, 0.06, actors, f.t < 0.25 ? f.by : null, null);
+        const who = sweep(f.p, f.p, nx, nx, 0.06, actors, f.t - (f.t0 || 0) < 0.25 ? f.by : null, null);
         if (who && (!hit || who.k <= hit.f)) {
           if (f.kind === 'molotov') {
             if (!f.remote) { this.burst(f, who.point.clone()); gone = true; }
@@ -1313,9 +1453,11 @@ export class Thrower {
     if (!A.organs.canHold(arm)) return false;
     const mesh = THROWABLES[kind].build();
     this.ctx.scene.add(mesh);
-    this.p = { t: 0, kind, mesh, held: true, relT: -1, prevHook: h.armHook, thrown: false, arm };
+    this.p = { t: 0, kind, mesh, held: true, relT: -1, prevHook: h.armHook, thrown: false, arm, cook: -1 };
     h.armHook = this.hook;
-    if (kind !== 'molotov' && !THROWABLES[kind].noPin) this.ctx.sfx('pin', 0.5, { vary: 0.1 });
+    // a grenade: the pin comes out as it's drawn, and the fuse is burning from here on
+    if (THROWABLES[kind].cook) { this.ctx.sys.pullPin(mesh); P_cook(this.p); }
+    else if (kind !== 'molotov' && !THROWABLES[kind].noPin) this.ctx.sfx('pin', 0.5, { vary: 0.1 });
     return true;
   }
   release() { if (this.p && this.p.held) { this.p.held = false; this.p.relT = this.p.t; } }
@@ -1330,8 +1472,25 @@ export class Thrower {
     this.p = null;
   }
   update() {
-    const A = this.actor;
-    if (this.p && (A.mode !== 'anim' || A.seat || A.hero.armHook !== this.hook)) this.cancel();
+    const A = this.actor, P = this.p;
+    // held too long: it goes off in the hand (or wherever it's dropped, knocked down holding it)
+    if (P && !P.thrown && P.cook >= FUSE[P.kind]) {
+      P.thrown = true;
+      const at = P.mesh.position.clone();
+      this.ctx.scene.remove(P.mesh);
+      if (this.ctx.sys.take(P.kind)) this.ctx.sys.launch(P.kind, A, at, V(), FUSE[P.kind]);
+      this.cancel();
+      return;
+    }
+    if (P && (A.mode !== 'anim' || A.seat || A.hero.armHook !== this.hook)) {
+      // (a lit grenade isn't put away: it drops from the hand, still burning)
+      if (P.cook >= 0 && !P.thrown) {
+        P.thrown = true;
+        this.ctx.scene.remove(P.mesh);
+        if (this.ctx.sys.take(P.kind)) this.ctx.sys.launch(P.kind, A, P.mesh.position.clone(), V(0, 0.5, 0), P.cook);
+      }
+      this.cancel();
+    }
   }
 
   /** How hard: builds while held. */
@@ -1352,6 +1511,7 @@ export class Thrower {
       if (h.armHook !== this.hook) { P.prevHook = h.armHook; h.armHook = this.hook; }
     }
     P.t += dt;
+    if (P.cook >= 0) P.cook += dt;
     const a = h.arms[P.arm], side = a.side;
     const O = V(), yq = new THREE.Quaternion();
     bodyFrame(h, O, yq);
@@ -1401,7 +1561,7 @@ export class Thrower {
     this.ctx.scene.remove(P.mesh);
     if (!this.ctx.sys.take(P.kind)) return;
     const from = P.mesh.position.clone();
-    this.ctx.sys.launch(P.kind, this.actor, from, this.velocity(P));
+    this.ctx.sys.launch(P.kind, this.actor, from, this.velocity(P), P.cook > 0 ? P.cook : 0);
     this.ctx.sfx('whoosh', 0.45, { rate: 0.85, vary: 0.1 });
   }
 
@@ -1429,3 +1589,7 @@ export class Thrower {
   }
 }
 const _s = V(), _pole = V(), _hp = V(), _hq = new THREE.Quaternion();
+const _bp = V(), _bw = V(), _bq = new THREE.Quaternion();
+const P_cook = (P) => { P.cook = 0; };
+// the grenade's blast on top of a frag's (big = 2: half as far again): harder, limbs off from further
+const GRENADE = { dmg: 1.6, rip: 1.6, frags: 30, spare: true };

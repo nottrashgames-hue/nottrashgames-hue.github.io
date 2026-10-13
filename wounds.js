@@ -145,6 +145,7 @@ export class Wounds {
 
   /** Wipe every wound, stain and drip off the body (respawn). */
   heal() {
+    this.traces = [];
     for (const d of this.drips) d.bead && this.sys.scene.remove(d.bead);
     this.wounds = [];
     this.drips = [];
@@ -156,6 +157,17 @@ export class Wounds {
     for (const f of this.feet) { f.wet = 0; f.down = false; }
     for (const { vol } of this.vols) vol.clear();
     undent(this.allMeshes());
+  }
+
+  /** Clear blood: every drop of blood off the body (skin, clothes, shoes) - wounds and bruises stay. */
+  clearBlood() {
+    for (const d of this.drips) d.bead && d.bead.removeFromParent();
+    this.drips = [];
+    this.lost = 0;
+    for (const w of this.wounds) w.bleed = 0;
+    for (const p of Object.values(this.parts)) { p.wet = 0; p.ink = undefined; }
+    for (const f of this.feet) { f.wet = 0; f.ink = undefined; }
+    for (const { vol } of this.vols) vol.clearBlood();
   }
 
   allMeshes() { return [...new Set(Object.values(this.parts).flatMap((p) => p.meshes))]; }
@@ -511,6 +523,7 @@ export class Wounds {
     const dir = (vel.lengthSq() > 1e-6 ? vel.clone() : n.clone()).normalize();
     const depth = 0.07 + 0.07 * clamp(sev, 0, 1.5);
     const organs = this.actor.organs?.shot(entry, dir, entry.clone().addScaledVector(dir, depth));
+    this.trace('stab', name, entry, entry.clone().addScaledVector(dir, depth), organs?.hits || []);
     if (organs) {
       if (w) { w.bleed *= Math.min(organs.bleed, 4); w.clot = 50 + 30 * (organs.bleed - 1); }
       if (organs.lethal) this.actor.organs.die();
@@ -564,6 +577,16 @@ export class Wounds {
     part.wet = Math.min(1, part.wet + amt);
   }
 
+  /** A wound's path inside (scanner.js): world a -> b, kept in part `name`'s frame. */
+  trace(kind, name, a, b, hits, exited = false) {
+    const g = this.parts[name]?.group;
+    if (!g) return;
+    g.updateWorldMatrix(true, false);
+    (this.traces ||= []).push({ kind, part: name, a: g.worldToLocal(a.clone()), b: g.worldToLocal(b.clone()), hits: [...hits], exited });
+    if (hits.length) this.actor.logHit?.(hits);
+    if (this.traces.length > 40) this.traces.shift();
+  }
+
   addWound(name, hit, bleed, next, kind) {
     const part = this.parts[name];
     const local = part.group.worldToLocal(hit.point.clone());
@@ -600,6 +623,9 @@ export class Wounds {
     }
     // what it tore through inside decides how hard (and how long) the holes bleed
     const organs = this.actor.organs?.shot(entryHit ? entryHit.point : point, d, ex ? exitAt : null) || { bleed: 1, hits: [] };
+    // (for the medical scanner: the round's path through the body, in this part's frame)
+    const e0 = entryHit ? entryHit.point : point;
+    this.trace('gun', name, e0, ex ? exitAt : e0.clone().addScaledVector(d, 0.35), organs.hits, !!exitW);
     for (const w of [entry, exitW]) {
       if (!w) continue;
       w.bleed *= organs.bleed;

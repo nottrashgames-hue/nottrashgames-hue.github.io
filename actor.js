@@ -15,6 +15,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const smooth = (t) => t * t * (3 - 2 * t);
 const H = 1 / 240;
+const ARTERIES = new Set(['carotid', 'aorta', 'iliac', 'femoral', 'popliteal', 'brachial']);
 
 /**
  * Owns the animated Character and its physical Ragdoll, and switches between them:
@@ -236,10 +237,30 @@ export class Actor {
     a.fingers.forEach(([f1, f2]) => { f1.rotation.z = -0.35; f2.rotation.z = -0.3; });
   }
 
+  /**
+   * The scanner's impact history (scanner.js): a weapon hit that reached bones or organs.
+   * tissues: organs.js names (femurL, heart, ribs...); only bones and organs are kept.
+   */
+  logHit(tissues) {
+    const W = this._weapon;
+    // (only within the hit itself: a fall or a crush later on isn't the weapon's doing)
+    if (!W || performance.now() - this._weaponT > 40) return;
+    const t = [...new Set(tissues)].filter((n) => !ARTERIES.has(n.replace(/[LR]$/, '')));
+    if (!t.length) return;
+    const L = (this.hitLog ||= []);
+    const now = performance.now(), last = L[L.length - 1];
+    // (one blow: what it breaks after it's gone in joins the same entry)
+    if (last && last.w === W && now - last.t < 300) { for (const n of t) if (!last.tissues.includes(n)) last.tissues.push(n); return; }
+    L.push({ t: now, weapon: W.weapon, kind: W.kind, tissues: t, w: W });
+    if (L.length > 30) L.shift();
+  }
+
   /** Hit by a bullet on part `name` at world `point`, travelling along `dir`. */
-  shot(name, point, dir) {
+  shot(name, point, dir, weapon = null) {
     // (admin.js: god mode - nothing touches you)
     if (this.god) return;
+    // (what it was, for the scanner's impact history: logged by what it hits inside - wounds.js trace)
+    this._weapon = { weapon: weapon || 'Gunshot', kind: 'gun' }; this._weaponT = performance.now();
     if (this.remote) {
       // the wound shows here; the body's owner takes the hit for real
       this.onRemoteHit?.('shot', name, point, dir);
@@ -286,6 +307,10 @@ export class Actor {
    */
   struck(name, point, vel, n, w, by) {
     if (this.god) return;
+    // (what it was, for the scanner's impact history: the bones and organs it reaches log it -
+    // wounds.js trace for a blade going in, organs.js for a bone it breaks)
+    this._weapon = w.sip ? null : { weapon: w.label || ({ fist: 'Fist', blunt: 'Blunt', blade: 'Blade', bite: 'Bite' })[w.kind] || 'Hit', kind: w.kind === 'blade' ? 'blade' : 'blunt' };
+    this._weaponT = performance.now();
     // a vampire's blows land far harder (once: the boosted blow is what goes over the network)
     if (by?.hero?.look?.vampire && w.kind !== 'bite' && !w.vk) w = { ...w, vk: 1, sev: w.sev * 1.6, mass: w.mass * 1.9, maxImp: (w.maxImp || 90) * 1.9 };
     const kind = name.replace(/[LR]$/, '');
@@ -452,6 +477,7 @@ export class Actor {
     this.crippled = false;
     this.tied = null;
     this.wounds?.heal();
+    this.hitLog = [];
     this.organs?.heal();
     if (!this.gunHeld && !this.meleeHeld && !this.meleeHeldL) this.hero.armHook = null;
     this.hero.twist = this.hero.bend = 0;
@@ -485,6 +511,8 @@ export class Actor {
   }
   postStep() {
     this.rd.guard();
+    // bones under too much weight snap (organs.js press); the body's owner decides
+    if (this.mode === 'ragdoll' && !this.remote && !this.god && this.organs) this.rd.pressure((p, J) => this.organs.press(p, J, H));
     if (this.mode === 'ragdoll' && this.pending) {
       const { imp, local, part, point } = this.pending;
       if (part) this.rd.impulseAt(part, imp, point);

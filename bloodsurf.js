@@ -2,6 +2,7 @@ import { settings } from './settings.js';
 const floorOn = () => settings.blood && settings.bloodFloor && settings.bloodAmount > 0;
 import * as THREE from 'three';
 import { ShapeGrid } from './world.js';
+import { BloodPainter } from './bloodpaint.js';
 import { DRY_T } from './dry.js';
 import { inkOf, inkRGB, noInk, RAINBOW_GLSL, INK_PEARL, PRISM, PRISM_GLSL, PRISM_V, prismBucket, INK_FX_GLSL, INK_T } from './inks.js';
 
@@ -148,17 +149,11 @@ class Surf {
     const ppm = sys.ppm || PPM;
     const rw = Math.min(1024, Math.ceil(w * ppm)), rh = Math.min(1024, Math.ceil(h * ppm));
     this.sx = rw / w; this.sy = rh / h;
-    const canvas = document.createElement('canvas');
-    canvas.width = rw; canvas.height = rh;
-    this.ctx = canvas.getContext('2d');
-    this.tex = new THREE.CanvasTexture(canvas);
-    this.tex.colorSpace = THREE.NoColorSpace;
-    this.tex.flipY = false;
-    this.tex.anisotropy = 4;
-    // (premultiplied: filtering and mipmaps blend the ink colour with bare floor without
-    // darkening it - unpremultiplied, an edge fades through dim colours the shader reads as
-    // prism ink, a coloured outline round every stain, worst at a headset's lower resolution)
-    this.tex.premultiplyAlpha = true;
+    // the stain itself: a texture on the GPU, painted straight into (bloodpaint.js). It holds
+    // premultiplied colour, like the canvas it replaced: filtering and mipmaps blend the ink
+    // colour with bare floor without darkening it (no coloured outline round every stain)
+    this.rt = sys.painter.target(rw, rh);
+    this.tex = this.rt.texture;
     // quad with explicit per-corner blood uvs (s/w, t/h)
     const g = new THREE.BufferGeometry();
     // (the quad only spans the blocks that hold blood - see fit - so a few drops on a big tile
@@ -246,12 +241,9 @@ class Surf {
   dir(vec) { return [vec.dot(this.u), vec.dot(this.v)]; }
   /** Paint on the wet canvas; (s0,t0)-(s1,t1) bounds what it can reach (those blocks are fresh again). */
   paint(draw, s0, t0, s1, t1) {
-    const g = this.ctx;
-    g.save();
-    penReset(g, this.sx, this.sy);
+    const g = (PG = this.sys.painter.begin(this, this.sx, this.sy));
     draw(g);
-    g.restore();
-    this.dirty = true;
+    g.reset();
     this.touch(s0, t0, s1, t1);
   }
   touch(s0, t0, s1, t1) {
@@ -300,13 +292,11 @@ class Surf {
     const k = j * this.bw + i;
     this.bt[k] = -1;
     this.live--;
-    const cv = this.ctx.canvas;
-    const x0 = Math.round(i * BLOCK * this.sx), x1 = Math.min(cv.width, Math.round(Math.min((i + 1) * BLOCK, this.w) * this.sx));
-    const y0 = Math.round(j * BLOCK * this.sy), y1 = Math.min(cv.height, Math.round(Math.min((j + 1) * BLOCK, this.h) * this.sy));
+    const x0 = Math.round(i * BLOCK * this.sx), x1 = Math.min(this.rt.width, Math.round(Math.min((i + 1) * BLOCK, this.w) * this.sx));
+    const y0 = Math.round(j * BLOCK * this.sy), y1 = Math.min(this.rt.height, Math.round(Math.min((j + 1) * BLOCK, this.h) * this.sy));
     if (x1 <= x0 || y1 <= y0) return;
     // after DRY_T the stain is gone (not kept as dried blood)
-    this.ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
-    this.dirty = true;
+    this.sys.painter.clearRect(this, x0, y0, x1 - x0, y1 - y0);
     // nothing left there to pick up
     for (let y = j * BLOCK; y < (j + 1) * BLOCK - 1e-6; y += CELL) for (let x = i * BLOCK; x < (i + 1) * BLOCK - 1e-6; x += CELL) {
       const c = this.cell(x + CELL / 2, y + CELL / 2);
@@ -317,7 +307,8 @@ class Surf {
     this.mesh.removeFromParent();
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
-    this.tex.dispose();
+    this.sys.painter.forget(this);
+    this.rt.dispose();
     this.dryTex?.dispose();
     this.ageTex.dispose();
   }
@@ -356,80 +347,30 @@ export const ownId = (a) => {
   if (!id) { id = (ownN = ownN % 65535 + 1); OWNERS.set(a, id); }
   return id;
 };
-const BRUSH = [];
-const inkFill = () => `rgb(${inkRGB(INK)})`;
-function brush() {
-  // (prism: a brush per colour step)
+// the ink's key colour (0..1), as the brushes paint it (prism: a colour per step)
+const COLS = [];
+function inkCol() {
   const k = INK === PRISM ? 'p' + prismBucket() : INK;
-  if (BRUSH[k]) return BRUSH[k];
-  const N = 128;
-  const c = BRUSH[k] = document.createElement('canvas');
-  c.width = c.height = N;
-  const g = c.getContext('2d');
-  const gr = g.createRadialGradient(N / 2, N / 2, 0, N / 2, N / 2, N / 2);
-  const rgb = inkRGB(INK);
-  gr.addColorStop(0, `rgba(${rgb},1)`);
-  gr.addColorStop(0.55, `rgba(${rgb},0.75)`);
-  gr.addColorStop(1, `rgba(${rgb},0)`);
-  g.fillStyle = gr;
-  g.fillRect(0, 0, N, N);
-  return c;
+  return COLS[k] ||= inkRGB(INK).split(',').map((x) => +x / 255);
 }
+const inkFill = () => inkCol();
 /*
-  The painters' transform, mirrored here instead of read back off the canvas: a dab is thousands
-  of times a second in a gush, and a getTransform (a fresh DOMMatrix) plus a setTransform(DOMMatrix)
-  back per dab cost more than the drawImage. The painters move the canvas with pen*() (the canvas
-  does the same translate / rotate / scale, and the mirror follows with Blink's own arithmetic, in
-  its order, so it holds exactly the numbers getTransform would have given). A dab translates and
-  rotates the canvas itself as ever, and leaves it there - its alpha too; the next dab, or penSync
-  before anything else is drawn, puts the painters' transform (and alpha 1) back, just as
-  setTransform(getTransform()) did. Pixel for pixel the same as before.
+  The painters' pen (bloodpaint.js): the canvas-like recorder of the surface being painted. The
+  pen*() helpers move its transform; a dab is the soft round brush at its own alpha (it leaves
+  the pen's alpha alone); penSync puts the alpha back to 1 for anything that isn't a dab.
 */
-let TA = 1, TB = 0, TC = 0, TD = 1, TE = 0, TF = 0;
-let PG = null, penDirty = false, penA = 1;
-function penReset(g, sx, sy) {
-  g.setTransform(sx, 0, 0, sy, 0, 0);
-  TA = sx; TB = 0; TC = 0; TD = sy; TE = 0; TF = 0;
-  PG = g; penDirty = false;
-  penA = g.globalAlpha;
-}
-function penTranslate(x, y) {
-  PG.translate(x, y);
-  TE += x * TA + y * TC;
-  TF += x * TB + y * TD;
-}
-function penRotate(r) {
-  PG.rotate(r);
-  const c = Math.cos(r), s = Math.sin(r);
-  const a = c * TA + s * TC, b = c * TB + s * TD;
-  TC = -s * TA + c * TC; TD = -s * TB + c * TD;
-  TA = a; TB = b;
-}
-function penScale(x, y) {
-  PG.scale(x, y);
-  TA *= x; TB *= x; TC *= y; TD *= y;
-}
-const penGet = () => [TA, TB, TC, TD, TE, TF];
-function penSet(m) {
-  TA = m[0]; TB = m[1]; TC = m[2]; TD = m[3]; TE = m[4]; TF = m[5];
-  PG.setTransform(TA, TB, TC, TD, TE, TF);
-  penDirty = false;
-}
-/** The canvas back on the painters' transform, at full alpha (for anything that isn't a dab). */
-function penSync(g) {
-  if (penDirty) { g.setTransform(TA, TB, TC, TD, TE, TF); penDirty = false; }
-  if (penA !== 1) { g.globalAlpha = 1; penA = 1; }
-}
+let PG = null;
+const penTranslate = (x, y) => PG.translate(x, y);
+const penRotate = (r) => PG.rotate(r);
+const penScale = (x, y) => PG.scale(x, y);
+const penGet = () => PG.getT();
+const penSet = (m) => PG.setT(m);
+function penSync(g) { g.globalAlpha = 1; }
 function dab(g, x, y, rx, ry, rot, a) {
   a = clamp(a, 0, 1);
   if (a <= 0) return;
-  if (a !== a) a = 1; // (NaN: the canvas ignores it and draws at the alpha it had - always 1)
-  if (penDirty) g.setTransform(TA, TB, TC, TD, TE, TF);
-  g.translate(x, y);
-  if (rot) g.rotate(rot);
-  if (penA !== a) { g.globalAlpha = a; penA = a; }
-  g.drawImage(brush(), -rx, -ry, rx * 2, ry * 2);
-  penDirty = true;
+  if (a !== a) a = 1; // (NaN: drawn at full alpha, as the canvas did)
+  g.dab(x, y, rx, ry, rot, a, inkCol());
 }
 
 /** Bounds (s0, t0, s1, t1) of a circle, and of a queue of strokes [as, at, bs, bt, width, ...]. */
@@ -460,15 +401,12 @@ export class BloodSurfaces {
     this.rebuild();
     /*
       Culling (set by main each frame): where the eye is, what it can see, and a test for a
-      wall in the way. Stains out of view, too far off, or behind a building aren't drawn - and
-      aren't uploaded to the GPU either until they come back into view (the canvas uploads are
-      most of what blood costs). far: metres; uploads / upRate: the upload budget.
+      wall in the way. Stains out of view, too far off, or behind a building aren't drawn. far: metres.
     */
     this.view = null; // { pos, frustum, occluded(from, to), far }
-    this.uploads = 6;
-    this.upRate = 1 / 30;
     this.maxShown = Infinity; // most stained surfaces drawn at once (nearest first)
-    this.ppm = PPM;           // canvas resolution of surfaces made from now on (lower in a headset)
+    this.ppm = PPM;           // texture resolution of surfaces made from now on
+    this.painter = new BloodPainter(); // (main sets painter.renderer)
     this.occT = 0;
   }
 
@@ -876,20 +814,16 @@ export class BloodSurfaces {
     this.ageT += dt;
     const aging = this.ageT >= AGE_DT;
     if (aging) this.ageT = 0;
-    let uploads = 0;
     for (const S of this.all) {
       if (aging) S.age();
-      const shown = S.mesh.visible;
-      if (S.dryDirty && shown && uploads < this.uploads) { S.dryTex.needsUpdate = true; S.dryDirty = false; uploads++; }
       S.wetT += dt;
       if (S.wetT > 0.5) {
         const k = DRY * S.wetT;
         if (S.live) for (let i = 0; i < S.wet.length; i++) if (S.wet[i] > 0) S.wet[i] = Math.max(0, S.wet[i] - k);
         S.wetT = 0;
       }
-      // a big canvas re-upload is the expensive part: each surface at most 30 times a second
-      S.upT -= dt;
-      if (S.dirty && shown && S.upT <= 0 && uploads < this.uploads) { S.tex.needsUpdate = true; S.dirty = false; S.upT = this.upRate; uploads++; }
     }
+    // everything painted this frame, drawn into the surfaces' textures on the GPU
+    this.painter.flush();
   }
 }

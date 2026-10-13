@@ -35,6 +35,20 @@ function box(scene, colliders, w, h, d, x, y, z, color, surface = 'concrete') {
   colliders.solids.push({ type: 'box', x, y: y + h / 2, z, w, h, d });
 }
 
+/**
+ * A ceiling over the walls: drawn and solid (rounds, blood and grenades stop on it), but not a
+ * floor anything stands on, and it casts no shadow - the sun still lights the room inside.
+ */
+function roof(scene, colliders, w, d, y, material) {
+  const T = 0.4;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, T, d), material);
+  mesh.position.set(0, y + T / 2, 0);
+  mesh.castShadow = false;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  colliders.solids.push({ type: 'box', x: 0, y: y + T / 2, z: 0, w, h: T, d });
+}
+
 function baseLevel(colliders, sun, surface, spawn, npcs) {
   return { colliders, sun, seats: [], parking: [], table: { x: 10000, z: 10000, top: 0 }, surfaceAt: () => surface, spawn: V(...spawn), spawnYaw: 0, spawnR: 5, npcs };
 }
@@ -107,6 +121,7 @@ export function buildMenuRoom(scene) {
   box(scene, colliders, S * 2 + 1, 5, 1, 0, 0, S + 0.5, wall);
   box(scene, colliders, 1, 5, S * 2 + 1, -S - 0.5, 0, 0, wall);
   box(scene, colliders, 1, 5, S * 2 + 1, S + 0.5, 0, 0, wall);
+  roof(scene, colliders, S * 2 + 2, S * 2 + 2, 5, new THREE.MeshStandardMaterial({ color: 0xe6ddd0, roughness: 0.9 }));
   // a rug under the dummy
   // (just over the floor, under the blood laid on it - bloodsurf.js, 6 mm up - so blood lands on top of it)
   const rug = new THREE.Mesh(new THREE.PlaneGeometry(4, 3), new THREE.MeshStandardMaterial({ color: 0x7c3b3b, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
@@ -138,6 +153,7 @@ export function buildRoom(scene, renderer) {
   for (const [w, d, x, z] of [[S * 2 + T * 2, T, 0, -S - T / 2], [S * 2 + T * 2, T, 0, S + T / 2], [T, S * 2, -S - T / 2, 0], [T, S * 2, S + T / 2, 0]]) {
     box(scene, colliders, w, H, d, x, 0, z, concrete(renderer, Math.max(w, d), H));
   }
+  roof(scene, colliders, S * 2 + T * 2, S * 2 + T * 2, H, concrete(renderer, S * 2 + T * 2, S * 2 + T * 2));
   const lvl = baseLevel(colliders, sun, 'concrete', [0, 0, 5], 1);
   lvl.soft = true;
   lvl.spawnYaw = Math.PI;

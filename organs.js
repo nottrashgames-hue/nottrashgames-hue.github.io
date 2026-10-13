@@ -287,8 +287,8 @@ export class Organs {
       if (o.kind === 'skull') this.hurtBrain(rnd(0.25, 0.5), true);
       if (e.lethal) this.brainDeath = true;
       if (e.spine) this.spine(o.obj);
-      if (e.legBone) this.breakLeg(e.legBone === 'both' ? null : o.name.slice(-1));
-      if (e.armBone) this.breakArm(o.name.slice(-1));
+      if (e.legBone) this.breakLeg(e.legBone === 'both' ? null : o.name.slice(-1), o.name);
+      if (e.armBone) this.breakArm(o.name.slice(-1), o.name);
       if (o.kind === 'artery') out.down = true;
     }
     if (S.lung || S.dieT >= 0) out.down = true;
@@ -301,11 +301,40 @@ export class Organs {
     const kind = name.replace(/[LR]$/, ''), side = name.slice(-1);
     if (sev < 1.4 || this.vamp) return;
     const p = (sev - 1.4) * 0.4;
-    if ((kind === 'shin' || kind === 'thigh' || kind === 'foot') && Math.random() < p) this.breakLeg(side);
-    else if ((kind === 'upper' || kind === 'fore') && Math.random() < p) this.breakArm(side);
+    if ((kind === 'shin' || kind === 'thigh' || kind === 'foot') && Math.random() < p) this.breakLeg(side, kind === 'thigh' ? 'femur' : 'tibia');
+    else if ((kind === 'upper' || kind === 'fore') && Math.random() < p) this.breakArm(side, kind === 'upper' ? 'humerus' : 'forearm');
     else if (kind === 'head' && Math.random() < p * 1.5) { this.faint(rnd(3, 8)); this.hurtBrain((sev - 1.1) * 0.12, true); }
     else if ((kind === 'chest' || kind === 'spine') && Math.random() < p * 0.6) this.state.pain = Math.min(1, this.state.pain + 0.5);
     else return;
+    this.apply();
+  }
+
+  /**
+   * A crushing load on a limb: impulse J (N s) pressed into part p over one physics step of h s.
+   * What's past what the bone carries adds up (and eases off once the weight's gone); held under
+   * enough of it - a car on a leg, a heavy landing on an arm - the bone snaps.
+   */
+  press(p, J, h) {
+    const kind = p.kind, side = p.name.slice(-1);
+    const leg = kind === 'thigh' || kind === 'shin' || kind === 'foot', arm = kind === 'upper' || kind === 'fore';
+    if (!leg && !arm) return;
+    const S = this.state;
+    if (leg ? S.limp.has('shin' + side) : S.armOut[side === 'L' ? 0 : 1]) return;
+    const L = this.loads ||= {};
+    const tough = this.vamp ? 2.5 : 1;
+    const F0 = (leg ? 2200 : 1500) * tough;       // N a bone takes without harm
+    const prev = L[p.name] || { v: 0, t: 0 };
+    // (leaks away with a half-second time constant since it was last pressed)
+    const now = performance.now() / 1000;
+    let v = prev.v * Math.exp(-(now - prev.t) / 0.5);
+    v += Math.max(0, J - F0 * h);
+    L[p.name] = { v, t: now };
+    if (v < (leg ? 320 : 220) * tough) return;
+    L[p.name] = { v: 0, t: now };
+    const at = this.actor.rd?.pos(p.name) || this.actor.hero.pos;
+    ORGAN_FX.sound?.('crunch', at, 1, leg ? 0.75 : 0.9);
+    ORGAN_FX.sound?.('gib', at, 0.35, 1.3);
+    if (leg) this.breakLeg(side, kind === 'thigh' ? 'femur' : 'tibia'); else this.breakArm(side, kind === 'upper' ? 'humerus' : 'forearm');
     this.apply();
   }
 
@@ -320,15 +349,23 @@ export class Organs {
       S.armOut = [true, true];
     }
   }
-  breakLeg(side) {
+  breakLeg(side, bone = 'tibia') {
     const S = this.state;
+    // (which bone went, for the medical scanner)
+    this.fractures ||= new Set();
+    const keys = bone === 'pelvis' ? ['pelvis'] : side ? [bone.replace(/[LR]$/, '') + side] : ['tibiaL', 'tibiaR'];
+    for (const k of keys) this.fractures.add(k);
+    this.actor.logHit?.(keys); // (the scanner's impact history: a blow that broke it)
     for (const n of side ? [side] : ['L', 'R']) { S.limp.add('shin' + n); S.limp.add('foot' + n); S.brokenLeg = true; }
     S.noRise = true;
     S.pain = Math.min(1, S.pain + 0.6);
     if (!this.actor.brain.dead) this.actor.onPain?.('shin' + (side || 'L'), 'broke', 1.5);
   }
-  breakArm(side) {
+  breakArm(side, bone = 'forearm') {
     const S = this.state;
+    const key = bone.replace(/[LR]$/, '') + side;
+    (this.fractures ||= new Set()).add(key);
+    this.actor.logHit?.([key]);
     S.limp.add('fore' + side);
     S.limp.add('upper' + side);
     S.armOut[side === 'L' ? 0 : 1] = true;
@@ -364,7 +401,7 @@ export class Organs {
       if (t > 2.2 && s > 0.6) { this.internal += 0.0035 * s; hurt(0.2); }
       if (t > 3.5 && s > 0.9 && chance(0.35)) this.faint(rnd(6, 14));
       // caved in: the brain's gone
-      if (t > (this.undead ? 4.6 : 5.2)) { this.die(); return; }
+      if (t > (this.undead ? 4.6 : 5.2)) { this.brainDeath = true; this.die(); return; }
       // stamped on: the neck can snap
       if (s > 1.05 && t > 2.8 && chance(0.14)) this.spine(A.hero.neck);
     } else if (part === 'spine' && t > 5 && s > 0.9 && chance(0.25)) this.spine(A.hero.spine); // (the back, hammered: the legs go)
@@ -381,9 +418,9 @@ export class Organs {
       this.internal += 0.0012 * s * (t > 2 ? 2 : 1);
       if (s > 0.85 && chance((s - 0.6) * 0.45)) { this.internal += 0.007; S.gut = this.undead ? 0 : 1; hurt(0.5); }
     } else if (part === 'thigh' || part === 'shin' || part === 'foot') {
-      if (chance(clamp((s - 0.9) * 0.55 + (t > 3 ? 0.15 : 0), 0, 0.7))) this.breakLeg(side);
+      if (chance(clamp((s - 0.9) * 0.55 + (t > 3 ? 0.15 : 0), 0, 0.7))) this.breakLeg(side, part === 'thigh' ? 'femur' : 'tibia');
     } else if (part === 'upper' || part === 'fore') {
-      if (chance(clamp((s - 0.85) * 0.6 + (t > 2.5 ? 0.15 : 0), 0, 0.7))) this.breakArm(side);
+      if (chance(clamp((s - 0.85) * 0.6 + (t > 2.5 ? 0.15 : 0), 0, 0.7))) this.breakArm(side, part === 'upper' ? 'humerus' : 'forearm');
     }
     // (the undead: beaten until there's nothing left holding it together)
     if (this.undead && this.total > 22) { this.die(); return; }
@@ -648,9 +685,12 @@ export class Organs {
 
   /** Good as new (respawn). */
   heal() {
+    this.loads = null;
+    this.fractures = null;
     this.blood = 1;
     this.brainDmg = 0;
     this.brainDeath = false;
+    this.cause = null;
     this.postureKind = null;
     this.postDelay = 0;
     this.actor.brain.neuro.reset();
@@ -676,6 +716,8 @@ export class Organs {
     const b = this.actor.brain;
     if (b.dead || this.actor.god) return;
     b.dead = true;
+    // (what killed it, for the medical scanner)
+    this.cause = this.brainDeath || this.brainDmg > 0.45 ? 'brain' : this.blood < 0.32 ? 'blood' : this.state.dieT >= 0 ? 'heart' : 'other';
     this.state.dieT = -1;
     // a brain killed outright: a last fit, a last posture, as the body goes
     b.neuro.clearPosture();

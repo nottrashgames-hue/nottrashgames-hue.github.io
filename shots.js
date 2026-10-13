@@ -114,7 +114,7 @@ export class Shots {
     if (!hit) return null;
     if (hit.actor) {
       // someone else's shot, replayed for the look of it: their client lands the hit
-      if (!visual) hit.actor.shot(hit.part, hit.point, dir);
+      if (!visual) hit.actor.shot(hit.part, hit.point, dir, this.weapon || null);
       this.sfx?.('flesh', 0.8);
     } else {
       // anything loose it hits (a bin, a chair) takes the round's push - and wakes up
