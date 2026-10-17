@@ -70,7 +70,7 @@ export class MenuBoard {
       g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 22); g.fill();
       g.fillStyle = on ? '#15130c' : '#f2efe8';
       g.font = 'bold 58px system-ui, sans-serif';
-      g.fillText(b.name, b.x + b.w / 2, b.y + b.h / 2 + 2);
+      g.fillText(b.name, b.x + b.w / 2, b.y + b.h / 2 + 2, b.w - 24);
     });
     this.tex.needsUpdate = true;
   }

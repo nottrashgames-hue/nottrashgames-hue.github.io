@@ -25,6 +25,7 @@ import { rimGLSL } from './rim.js';
 */
 
 const MAXVOX = 150000;
+const HOLES = 24; // bullet holes through the clothes, per volume
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 const BLANK = new THREE.Data3DTexture(new Uint8Array(4), 1, 1, 1);
@@ -45,11 +46,22 @@ export class StainVol {
     this.size = new THREE.Vector3(this.nx, this.ny, this.nz).multiplyScalar(this.vox);
     this.u = {
       stainVol: { value: BLANK },
+      // (1 once the volume has data: until then nothing is sampled, so an empty volume reads as no
+      // stain whatever a driver returns for the 1-texel placeholder)
+      stainOn: { value: 0 },
+      foOn: { value: 0 },
       stainMin: { value: this.min },
       stainInv: { value: new THREE.Vector3(1 / this.size.x, 1 / this.size.y, 1 / this.size.z) },
       // (what's on this body that isn't its own blood: see addForeign)
       foVol: { value: BLANK },
+      // bullet holes torn through the fabric (stain space centre, radius): see hole()
+      uHoles: { value: Array.from({ length: HOLES }, () => new THREE.Vector4()) },
+      // (the skin that shows in a hole: the body's own skin colour - set by wounds.js)
+      uHoleSkin: { value: new THREE.Color(0xd49a78) },
+      // (how many of uHoles are in use: the rest are never looked at)
+      uHoleN: { value: 0 },
     };
+    this.holeN = 0;
     this.fo = null;
     this.data = null;
     this.cloth = [];      // cloth triangles to build the wicking mask from
@@ -73,6 +85,7 @@ export class StainVol {
     this.tex.unpackAlignment = 1;
     this.tex.needsUpdate = true;
     this.u.stainVol.value = this.tex;
+    this.u.stainOn.value = 1;
     // the fabric shell: voxels the cloth surface passes through (dilated by one)
     if (this.cloth.length) {
       const m = (this.mask = new Uint8Array(n));
@@ -165,6 +178,7 @@ export class StainVol {
       this.foTex.unpackAlignment = 1;
       this.foTex.needsUpdate = true;
       this.u.foVol.value = this.foTex;
+      this.u.foOn.value = 1;
       // (a texel of this one spans two of the main volume's: the same box, half as fine)
       this.fvox = [this.size.x / nx, this.size.y / ny, this.size.z / nz];
     }
@@ -295,8 +309,24 @@ export class StainVol {
     this.dry.clear();
   }
 
+  /**
+   * A hole torn through the fabric at stain point sp, radius r (m): the clothes are simply gone
+   * there and the skin underneath shows. Full: it merges into whichever hole is nearest.
+   */
+  hole(sp, r) {
+    const H = this.u.uHoles.value;
+    if (this.holeN < H.length) { H[this.holeN++].set(sp.x, sp.y, sp.z, r); this.u.uHoleN.value = this.holeN; return; }
+    let best = H[0], bd = Infinity;
+    for (const h of H) { const d = (h.x - sp.x) ** 2 + (h.y - sp.y) ** 2 + (h.z - sp.z) ** 2; if (d < bd) { bd = d; best = h; } }
+    const d = Math.sqrt(bd);
+    best.set((best.x + sp.x) / 2, (best.y + sp.y) / 2, (best.z + sp.z) / 2, Math.min(0.06, d / 2 + Math.max(best.w, r)));
+  }
+
   /** Wipe everything (respawn). */
   clear() {
+    for (const h of this.u.uHoles.value) h.set(0, 0, 0, 0);
+    this.holeN = 0;
+    this.u.uHoleN.value = 0;
     if (this.data) { this.data.fill(0); this.tex.needsUpdate = true; }
     if (this.fo) { this.fo.fill(0); this.foTex.needsUpdate = true; }
     this.soaking = 0;
@@ -391,15 +421,18 @@ export function stainMaterial(base, vol, cloth, ink = 0) {
   const split = typeof base.userData.split === 'number' ? new THREE.Color(base.userData.split) : null;
   // (rim.js: a colour its edges shade off into)
   const rim = Array.isArray(base.userData.rim) ? base.userData.rim : null;
+  // (character.js: the face's tint - lips, nostrils, cheeks - a per-vertex attribute; 0 elsewhere)
+  const tint = !!base.userData.tint;
+  if (tint) mat.defaultAttributeValues = { ...(mat.defaultAttributeValues || {}), tint: [0, 0, 0] };
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, vol.u);
     if (psy !== null) sh.uniforms.uPsyT = PSY_T;
     if (fx) sh.uniforms.uInkT = INK_T;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec3 stainPos;\nuniform vec3 stainMin;\nuniform vec3 stainInv;\nvarying vec3 vStainUvw;\nvarying vec3 vStainP;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvStainUvw = (stainPos - stainMin) * stainInv;\nvStainP = stainPos;');
+      .replace('#include <common>', '#include <common>\nattribute vec3 stainPos;\nuniform vec3 stainMin;\nuniform vec3 stainInv;\nvarying vec3 vStainUvw;\nvarying vec3 vStainP;' + (tint ? '\nattribute vec3 tint;\nvarying vec3 vTint;' : ''))
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvStainUvw = (stainPos - stainMin) * stainInv;\nvStainP = stainPos;' + (tint ? '\nvTint = tint;' : ''));
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\nuniform highp sampler3D stainVol, dryVol, ageVol, foVol;\nuniform vec3 ageScale;\nvarying vec3 vStainUvw;\nvarying vec3 vStainP;
+      .replace('#include <common>', `#include <common>\nuniform highp sampler3D stainVol, dryVol, ageVol, foVol;\nuniform float stainOn, foOn;\nuniform vec3 ageScale;\nvarying vec3 vStainUvw;\nvarying vec3 vStainP;${tint ? '\nvarying vec3 vTint;' : ''}${cloth ? `\nuniform vec4 uHoles[${HOLES}];\nuniform vec3 uHoleSkin;\nuniform float uHoleN;` : ''}
         float bloodRelief = 0.0;
         vec3 perturbBloodNormal(vec3 surfPos, vec3 surfNorm, vec2 heightGrad) {
           vec3 sigmaX = dFdx(surfPos), sigmaY = dFdy(surfPos);
@@ -413,13 +446,35 @@ export function stainMaterial(base, vol, cloth, ink = 0) {
         ${prism ? PRISM_GLSL : ''}
         ${fx ? INK_FX_GLSL : ''}`)
       .replace('#include <map_fragment>', shadeGLSL(`#include <map_fragment>
+        ${tint ? 'diffuseColor.rgb *= max(vec3(0.0), 1.0 + vTint);' : ''}
         ${psy !== null ? `diffuseColor.rgb = psyCol(vStainP, uPsyT, ${psy.toFixed(3)});` : ''}
         ${split ? `if (vStainP.x < 0.0) diffuseColor.rgb = vec3(${split.r.toFixed(4)}, ${split.g.toFixed(4)}, ${split.b.toFixed(4)});` : ''}
-        vec4 st = texture(stainVol, vStainUvw);
-        vec2 sd = texture(dryVol, vStainUvw).rg;   // baked, dried blood: film, soak
+        vec4 st = stainOn > 0.5 ? texture(stainVol, vStainUvw) : vec4(0.0);
+        vec2 sd = stainOn > 0.5 ? texture(dryVol, vStainUvw).rg : vec2(0.0);   // baked, dried blood: film, soak
         float age = smoothstep(0.0, 1.0, texture(ageVol, vStainUvw * ageScale).r);
         float stainWet = 0.0, stainCover = 0.0;
         ${cloth ? `
+        // bullet holes: the fabric torn away (a ragged edge), singed and frayed dark round it
+        // In the hole: the skin underneath, wounded (the fabric IS the body's surface there - there's
+        // nothing under it to show - so the hole is drawn as skin, never cut out of the body).
+        // (straight-line code, no branching or discard inside the loop: some GPU drivers - ANGLE
+        // on Direct3D - fail to compile a discard / continue in a loop, and then every piece of
+        // clothing, the shirt and shorts that ARE the torso, simply doesn't draw)
+        float holeRim = 0.0, holeCut = 0.0, holeIn = 0.0;
+        for (int hi = 0; hi < ${HOLES}; hi++) {
+          vec4 H = uHoles[hi];
+          vec3 hd = vStainP - H.xyz;
+          float hr = length(hd);
+          vec3 hn = hd / max(hr, 1e-4);
+          // (only the slots in use; epsilons that survive mediump - 1e-6 flushes to 0 there, and an
+          // empty all-zero slot then reads as a hole over the whole garment)
+          float on = step(float(hi) + 0.5, uHoleN) * step(1e-4, H.w);
+          float jag = H.w * (0.78 + 0.22 * sin(hn.x * 23.0 + hn.y * 17.0) * cos(hn.z * 19.0 - hn.y * 11.0));
+          float inside = on * (1.0 - step(jag, hr));
+          holeCut = max(holeCut, inside);
+          holeIn = max(holeIn, inside * clamp(1.0 - hr / max(jag, 1e-4), 0.0, 1.0));
+          holeRim = max(holeRim, on * (1.0 - smoothstep(jag, H.w * 1.9 + 1e-4, hr)));
+        }
         // fabric: blood soaks in - fuzzy edge, darker and browner where it's heavy; drying, it
         // goes a stiff matte brown-black
         float s = max(st.a, st.r), sD = max(sd.g, sd.r);
@@ -436,7 +491,13 @@ export function stainMaterial(base, vol, cloth, ink = 0) {
         diffuseColor.rgb = mix(diffuseColor.rgb, wetCol, e * 0.94);
         // soaked fabric around the stain is darker too
         diffuseColor.rgb *= 1.0 - 0.18 * smoothstep(0.02, 0.12, max(s, sD)) * (1.0 - max(e, eD));
+        diffuseColor.rgb *= 1.0 - 0.7 * holeRim * holeRim * (1.0 - holeCut);
+        // skin at the torn edge (a little bruised), the wound raw red, a dark wet hole in the middle
+        vec3 holeCol = mix(uHoleSkin * vec3(0.85, 0.7, 0.68), vec3(0.42, 0.04, 0.05), smoothstep(0.25, 0.55, holeIn));
+        holeCol = mix(holeCol, vec3(0.05, 0.0, 0.004), smoothstep(0.6, 0.8, holeIn));
+        diffuseColor.rgb = mix(diffuseColor.rgb, holeCol, holeCut);
         stainWet = e * smoothstep(0.2, 0.9, st.r) * (1.0 - age);
+        stainWet = max(stainWet, holeCut * 0.7 * smoothstep(0.25, 0.55, holeIn));
         stainCover = max(e, eD);
         ` : `
         // bruise: dull purple under the skin
@@ -495,7 +556,7 @@ export function stainMaterial(base, vol, cloth, ink = 0) {
         // what isn't this body's own (StainVol.addForeign): someone else's blood, vomit - in its
         // own colour, darker where it's thick; soaked into cloth it's fuzzier and duller
         {
-          vec4 fo = texture(foVol, vStainUvw);
+          vec4 fo = foOn > 0.5 ? texture(foVol, vStainUvw) : vec4(0.0);
           float fe = smoothstep(${cloth ? '0.04, 0.25' : '0.1, 0.22'}, fo.a);
           if (fe > 0.001) {
             vec3 fc = fo.rgb / max(fo.a, 1e-3) * mix(1.0, 0.62, smoothstep(0.3, 1.0, fo.a));
@@ -518,6 +579,6 @@ export function stainMaterial(base, vol, cloth, ink = 0) {
       .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n        metalnessFactor *= 1.0 - stainCover;');
     if (rim) sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', rimGLSL(rim[0], rim[1]));
   };
-  mat.customProgramCacheKey = () => (cloth ? 'stain-cloth' : 'stain-skin') + '-' + ink + (psy !== null ? '-psy' + psy : '') + (split ? '-split' + split.getHexString() : '') + (rim ? '-rim' + rim.join('_') : '');
+  mat.customProgramCacheKey = () => (cloth ? 'stain-cloth' : 'stain-skin') + '-' + ink + (psy !== null ? '-psy' + psy : '') + (split ? '-split' + split.getHexString() : '') + (rim ? '-rim' + rim.join('_') : '') + (tint ? '-tint' : '');
   return mat;
 }

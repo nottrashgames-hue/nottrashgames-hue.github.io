@@ -10,6 +10,8 @@ import { pullPart } from './grabbing.js';
 import { sawStep } from './saw.js';
 import { chopPush } from './chop.js';
 import { Scanner } from './scanner.js';
+import { VRDrive } from './vrdrive.js';
+import { VRTouch } from './vrtouch.js';
 
 /*
   WebXR: your head is the camera, your controllers drive the body's arms (two-bone IK onto the
@@ -116,7 +118,7 @@ export const WHEEL_PAGES = [
     { type: 'pencil', name: 'Pencil' },
     { type: 'bat', name: 'Bat' },
     { type: 'machete', name: 'Machete' },
-    { type: 'saw', name: 'Saw' },
+    { type: 'hammer', name: 'Hammer' },
   ] },
   { name: 'GUNS', items: [
     { type: null, name: 'Hands' },
@@ -133,6 +135,9 @@ export const WHEEL_PAGES = [
 
 const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _p = V(), _q = Q(), _s = V(), _v = V(), _w = V();
 const _pole = V(), _rx = new THREE.Matrix4();
+const _hq = Q(), _hq2 = Q(), _hq3 = Q(), _hq4 = Q(), _hw2 = V(), _hT = V(), _hV = V(), _hw = V(), _hz = V(), _hW = V(), _hP = V(), _hA = V(), _hB = V(), _hC = V(), _hD = V();
+// a hand's grip (firmHold): N it can pull with; N m it can twist a body with - one hand, two
+const GRIP_F = 1100, GRIP_T1 = 60, GRIP_T2 = 120;
 // a grenade in the palm: its top toward the thumb, the pin's ring out where the other hand can reach it
 // (the same lean as a melee weapon's shaft; the right hand's keeps the grenade's -x - its ring - to
 // the left, toward the other hand, the left hand's mirrors it)
@@ -167,6 +172,8 @@ export class VRMode {
     this.held = { left: null, right: null }; // what each bare hand has hold of
     this.palm = { left: V(), right: V() };
     this.palmVel = { left: V(), right: V() };
+    this.palmQ = { left: null, right: null };   // each hand's orientation (a held part turns with it)
+    this.sag = { left: 0, right: 0 };           // m a held weight pulls each hand down
     // (Calibrate height: your real standing eye height, kept for next time)
     this.calibY = (() => { try { return +localStorage.getItem('vrStandY') || 0; } catch (e) { return 0; } })();
     this.dy0 = 0;              // rig height over the feet while you stand (crouching, it eases to 0)
@@ -190,6 +197,8 @@ export class VRMode {
     }
     this.hook = (h, dt) => this.poseArms(h, dt);
     this.scanner = new Scanner(this);
+    this.drive = new VRDrive(this);
+    this.touch = new VRTouch(this);
     xr.addEventListener('sessionstart', () => this.enter());
     xr.addEventListener('sessionend', () => this.exit());
     this.button();
@@ -269,6 +278,7 @@ export class VRMode {
     this.scopeGun = null;
     this.spawner?.close();
     this.scanner.close();
+    if (this.drive.upTag) this.drive.upTag.visible = false;
     // the arms back to whatever's held
     const A = this.hero, g = A.gunHeld;
     if (g) A.hero.armHook = (h, dt) => g.poseHeld(h, dt); else armUp(A);
@@ -354,9 +364,12 @@ export class VRMode {
     const dz = (v) => (Math.abs(v) < 0.15 ? 0 : v);
     this.move.x = dz(lx); this.move.y = -dz(ly);
     this.run = Math.hypot(lx, ly) > 0.95;
+    // in a car (vrdrive.js): the wheel, the triggers and B are the car's
+    const inCar = this.drive.input();
     // snap turn: right stick, round the head
     const rx = R?.axes[2] || 0;
-    if (Math.abs(rx) > 0.7 && !this.turnLatch) { this.turnLatch = true; this.turn(rx > 0 ? -TURN : TURN); }
+    if (inCar) this.turnLatch = true;
+    else if (Math.abs(rx) > 0.7 && !this.turnLatch) { this.turnLatch = true; this.turn(rx > 0 ? -TURN : TURN); }
     else if (Math.abs(rx) < 0.3) this.turnLatch = false;
     this.roomWalk();
     // where you're looking
@@ -364,13 +377,16 @@ export class VRMode {
     this.yaw = Math.atan2(-_v.x, -_v.z);
     this.pitch = Math.asin(Math.max(-1, Math.min(1, -_v.y)));
     // weapon wheel: hold A on the right, let go to pick
-    if (this.edge('right', 4) && !this.menu?.visible && !this.spawner?.open) this.openWheel();
+    // knocked down (alive, out of a car): A gets you back up instead (vrdrive.js shows the tag)
+    const A0 = this.hero, down = A0.mode === 'ragdoll' && !A0.brain?.dead && !A0.seat;
+    if (down) { if (this.edge('right', 4)) { this.closeWheel(false); this.standUp?.(); } }
+    else if (this.edge('right', 4) && !this.menu?.visible && !this.spawner?.open) this.openWheel();
     if (this.edgeUp('right', 4)) this.closeWheel(true);
     // the wheel open: the right trigger turns its page (it never fires then: uiOpen)
     const trig = this.edge('right', 0);
     if (trig && this.wheel?.visible) this.flipPage(1);
     // B: the spawn menu (an empty gun reloads itself when you pull the trigger)
-    if (this.edge('right', 5) && this.spawner && !this.noSpawn) {
+    if (!inCar && this.edge('right', 5) && this.spawner && !this.noSpawn) {
       if (this.menu?.visible) { this.menu.visible = false; this.laser.visible = false; }
       this.closeWheel(false);
       this.spawner.toggle();
@@ -418,6 +434,7 @@ export class VRMode {
 
   /** The rig over the body: your eyes where its eyes are, give or take a lean. */
   place(h) {
+    if (this.hero.seat) { this.drive.place(); return; }
     const B = h.pos;
     this.rig.quaternion.setFromAxisAngle(UP, this.rigYaw);
     this.rig.position.set(B.x + this.off.x, B.y + this.dy, B.z + this.off.z);
@@ -443,6 +460,9 @@ export class VRMode {
   frame() {
     const h = this.hero.hero;
     this.place(h);
+    if (this.hero.seat) this.drive.frame();
+    this.drive.after();
+    this.touch.update();
     this.scanner.frame();
     h.head.visible = false;
     this.hideBody(true);
@@ -504,7 +524,7 @@ export class VRMode {
 
   // ---- the arms (the body's armHook: the last thing in its animation each frame) ----
   poseArms(h, dt) {
-    if (!this.on) return;
+    if (!this.on || this.hero.seat) return;
     this.place(h);
     h.twist = h.bend = 0;
     this.crouch(h);
@@ -555,6 +575,10 @@ export class VRMode {
     _p.sub(_v.applyQuaternion(_q));
     _m.compose(_p, _q, _s.set(1, 1, 1)).multiply(sized(hand === 'left' ? GUN_GRIP_L : GUN_GRIP_R, h));
     _m.decompose(_p, _q, _s);
+    // something heavy in the hand: it drags the hand down a little (sag, eased - holding())
+    const sg = this.held[hand] ? (this.sag[hand] || 0) : (this.sag[hand] = 0);
+    if (sg) _p.y -= sg;
+    (this.palmQ[hand] ||= Q()).copy(_q);
     poseArm(h, a, _p, _q, pole(a));
     this.freeNow[hand] = true;
     // the palm, and how fast it's going (to throw with)
@@ -665,7 +689,9 @@ export class VRMode {
     let best = null, bd = Infinity;
     for (const A of this.actors) {
       if (A === this.hero || (A.remote && !G.ctx?.tug) || A.seat || !A.rd || !A.groups || A.hero.shown === false) continue;
-      if (A.hero.pos.distanceTo(palm) > 3) continue;
+      // (ragdolled, the body can be metres from where their feet were: go by where it really is)
+      const at = A.mode === 'ragdoll' && !A.remote && A.rd.parts.pelvis && !A.rd.parts.pelvis.gone ? A.rd.pos('pelvis', _w) : A.hero.pos;
+      if (at.distanceTo(palm) > 3) continue;
       for (const name of A.rd.names) {
         if (A.rd.parts[name]?.gone) continue;
         const n = partNear(A, name, palm);
@@ -674,7 +700,9 @@ export class VRMode {
     }
     for (const c of this.chunks?.() || []) {
       if (!c.body || c.held) continue;
-      const t = c.body.translation(), d = Math.hypot(t.x - palm.x, t.y - palm.y, t.z - palm.z) - GRAB_CHUNK + GRAB_R;
+      // (a construction piece: from its surface - a long board is taken hold of anywhere along it)
+      const t = c.near ? c.near(palm, _w) : c.body.translation();
+      const d = Math.hypot(t.x - palm.x, t.y - palm.y, t.z - palm.z) - (c.near ? 0.06 : GRAB_CHUNK) + (c.near ? 0 : GRAB_R);
       if (d < GRAB_R && d < bd) { bd = d; best = { chunk: c }; }
     }
     if (!best) return;
@@ -697,13 +725,35 @@ export class VRMode {
     if (g.A && (!this.actors.includes(g.A) || g.A.rd.parts[g.name]?.gone)) {
       const c = G.pieceOf(g);
       if (!c) { this.letGo(hand); return; }
-      Object.assign(g, G.chunkGrip(g.i, c, g.W, 'carry'), { A: null, name: null, t: 1 });
+      Object.assign(g, G.chunkGrip(g.i, c, g.W, 'carry'), { A: null, name: null, t: 1, rel: null, relWith: undefined });
       c.held = true;
     }
     if (g.chunk && !this.chunks?.().includes(g.chunk)) { this.letGo(hand); return; }
     G.anchor(g, g.W);
     g.T.copy(this.palm[hand]);
     g.vT.copy(this.palmVel[hand]);
+    // the hand's turn: what it holds turns with it (holdTurn)
+    if (this.palmQ[hand]) {
+      const q = this.palmQ[hand];
+      if (g.Q && dt > 0) {
+        // (how fast the hand's turning: carried into what it holds)
+        const d = _hq.copy(q).multiply(_hq3.copy(g.Q).invert());
+        if (d.w < 0) { d.x = -d.x; d.y = -d.y; d.z = -d.z; d.w = -d.w; }
+        (g.wT ||= V()).lerp(_v.set(d.x, d.y, d.z).multiplyScalar(2 / dt), 0.5).clampLength(0, 20);
+      }
+      (g.Q ||= Q()).copy(q);
+    }
+    // the weight on this hand: a slight drag down (a whole body, one-handed: ~5 cm; two hands share it)
+    {
+      const A = g.A, both = this.held.left && this.held.right && this.held.left.A && this.held.left.A === this.held.right.A;
+      let kg = 0;
+      if (A && A.mode === 'ragdoll' && !A.remote) kg = (A.rd.mass || 70) * 0.55 / (both ? 2 : 1) + (A.rd.parts[g.name]?.mass || 2);
+      else if (g.chunk?.body) kg = g.chunk.body.mass?.() || 3;
+      // (and however far it's really hanging below the hand: the weight winning)
+      const lag = A && A.mode === 'ragdoll' ? Math.max(0, g.T.y - g.W.y) * 0.5 : 0;
+      const want = Math.min(0.08, Math.max(kg * 9.81 / 1150 * 0.13, lag));
+      this.sag[hand] += (want - this.sag[hand]) * Math.min(1, dt * 6);
+    }
     const d = g.W.distanceTo(g.T);
     g.far = d > LET_GO ? g.far + dt : 0;
     if (g.far > 0.3) { this.letGo(hand); return; }
@@ -749,14 +799,95 @@ export class VRMode {
     }
   }
 
+  /**
+   * The grip: the part in your hand is driven toward your palm (and its turn in your hand) every
+   * physics substep - but only as hard as a hand can. A person is heavy: one hand moves them with
+   * effort and barely turns them; two hands share the weight and, with leverage between them, turn
+   * them easily. What the hand drives goes into the part held and, through it, the rest of the
+   * body (the limb it hangs off most), so they come as a whole, with their weight dragging behind.
+   * hands: how many of yours are on this person. other: the other hand on this same part.
+   */
+  firmHold(g, H, other = null, hands = 1) {
+    const A = g.A, rd = A.rd, P = rd.parts[g.name];
+    if (!P || P.gone) return;
+    const b = P.body, r = b.rotation(), t = b.translation(), lv = b.linvel(), av = b.angvel();
+    const cur = _hq.set(r.x, r.y, r.z, r.w);
+    const T = other ? _hT.copy(g.T).lerp(other.T, 0.5) : _hT.copy(g.T);
+    const vT = other ? _hV.copy(g.vT).lerp(other.vT, 0.5) : _hV.copy(g.vT);
+    const str = g.str || 1, bodyM = rd.mass || 70;
+    // what the hand(s) have to move: this part, and their share of the body behind it
+    const M = P.mass + bodyM * 0.55 / hands;
+    // and to turn: the part is clamped in the hand (no pivoting round the grip like a ball joint);
+    // the rest of the body hangs off it through its own joints
+    const I = P.mass * 0.03 + bodyM * (hands > 1 ? 0.015 : 0.02);
+    const F = GRIP_F * str * (other ? 2 : 1);           // N
+    const TQ = (hands > 1 ? GRIP_T2 : GRIP_T1) * str;    // N m
+    // where the hand wants it: the grip point on the palm (closing the gap over a few substeps)...
+    const W = rd.point(g.name, g.local, _hW);
+    const arm = _hA.set(W.x - t.x, W.y - t.y, W.z - t.z);
+    const wantV = _hP.subVectors(T, W).multiplyScalar(1 / (H * 4)).add(vT).clampLength(0, 12);
+    // ...and turned the way the hand is (two hands on one part: they hold it, it turns as they do)
+    const wantW = _hw.set(av.x, av.y, av.z).multiplyScalar(0.92);
+    if (g.Q) {
+      // (one part in both hands: it keeps its turn between them)
+      const hq = other?.Q ? _hq4.copy(g.Q).slerp(other.Q, 0.5) : _hq4.copy(g.Q);
+      const key = other?.Q ? other : null;
+      if (!g.rel || g.relWith !== key) { g.rel = hq.clone().invert().multiply(cur); g.relWith = key; }
+      const e = _hq2.copy(hq).multiply(g.rel).multiply(_hq3.copy(cur).invert());
+      if (e.w < 0) { e.x = -e.x; e.y = -e.y; e.z = -e.z; e.w = -e.w; }
+      const wT = other?.Q ? _hw2.copy(g.wT || _hz).lerp(other.wT || _hz, 0.5) : (g.wT || _hz);
+      wantW.set(e.x, e.y, e.z).multiplyScalar(2 / (H * 5)).add(wT).clampLength(0, 18);
+    }
+    // what it takes, capped at what the hand has in it
+    const vW = _hB.set(av.x, av.y, av.z).cross(arm).add(_hC.set(lv.x, lv.y, lv.z)); // (the grip point's own speed)
+    const dv = wantV.sub(vW).clampLength(0, F * H / M);
+    const dw = wantW.sub(_hD.set(av.x, av.y, av.z)).clampLength(0, TQ * H / I);
+    // the part held: turned, and its grip point moved (less what the turn already does there)
+    const nl = _hC.add(dv).sub(_hB.crossVectors(dw, arm));
+    b.setLinvel({ x: nl.x, y: nl.y, z: nl.z }, true);
+    b.setAngvel({ x: av.x + dw.x, y: av.y + dw.y, z: av.z + dw.z }, true);
+    // the rest of what the hand put in goes on into the body: mostly up the limb it's attached by
+    const rest = M - P.mass;
+    if (rest <= 0) return;
+    const chain = [];
+    let mc = 0, mo = 0;
+    for (let n = P.def.parent; n; n = rd.parts[n].def.parent) { const C = rd.parts[n]; if (C && !C.gone) { chain.push(C); mc += C.mass; } }
+    for (const C of rd.list) if (C !== P && !C.gone && !chain.includes(C)) mo += C.mass;
+    const kc = chain.length ? 0.7 : 0, ko = 1 - kc;
+    for (const C of rd.list) {
+      if (C === P || C.gone) continue;
+      const inChain = chain.includes(C);
+      const share = inChain ? kc * C.mass / mc : mo > 0 ? ko * C.mass / mo : 0;
+      if (share <= 0) continue;
+      const j = rest * share;
+      C.body.applyImpulse({ x: dv.x * j, y: dv.y * j, z: dv.z * j }, true);
+    }
+  }
+
+  /** A loose piece in the hand turns with the hand (a clamp, not a ball joint at the palm). */
+  turnChunk(g, H) {
+    const b = g.chunk?.body;
+    if (!b || !g.Q) return;
+    const r = b.rotation(), cur = _hq.set(r.x, r.y, r.z, r.w);
+    if (!g.rel || g.relWith !== null) { g.rel = g.Q.clone().invert().multiply(cur); g.relWith = null; }
+    const e = _hq2.copy(g.Q).multiply(g.rel).multiply(_hq3.copy(cur).invert());
+    if (e.w < 0) { e.x = -e.x; e.y = -e.y; e.z = -e.z; e.w = -e.w; }
+    const w = _hw.set(e.x, e.y, e.z).multiplyScalar(2 / (H * 4)).add(g.wT || _hz).clampLength(0, 25);
+    b.setAngvel({ x: w.x, y: w.y, z: w.z }, true);
+  }
+
   /** Each physics substep (main.js): what the hands hold is pulled toward them. */
   preStep(H) {
     if (!this.on) return;
     const L = this.held.left, R = this.held.right;
     for (const g of [L, R]) {
       if (!g) continue;
-      if (g.chunk) this.grabber.pullChunk(g, H);
-      else if (g.A.mode === 'ragdoll' && !g.A.remote) pullPart(g, H, L && R && L.A === R.A ? 2 : 1);
+      if (g.chunk) { this.grabber.pullChunk(g, H); this.turnChunk(g, H); }
+      else if (g.A.mode === 'ragdoll' && !g.A.remote) {
+        const o = g === L ? R : L, same = o && o.A === g.A && o.name === g.name;
+        if (same && g === R) continue; // (one part in both hands: the left drives it, to between them)
+        this.firmHold(g, H, same ? o : null, o && o.A === g.A ? 2 : 1);
+      }
     }
   }
 
@@ -904,12 +1035,18 @@ export class VRMode {
     const S = m.stuckIn, mesh = m.mesh, A = S.actor;
     if (!mesh.parent || !A.hero.root.parent) { m.unstick(false); return; }
     S.goal = null; // (the hand drives it, not poseStuck)
+    // a cutting edge turns in the wound with your wrist - slowly, carving round as it goes
+    if (m.cutter && !S.chop) {
+      R.grip.matrixWorld.decompose(_p, _q, _s);
+      m.twistStuck(_q.multiply(MELEE_ROT).clone(), dt);
+      if (m.stuckIn !== S) { this.prevSeg = null; return; }
+    }
     mesh.updateMatrixWorld(true);
     const handle = V().setFromMatrixPosition(mesh.matrixWorld);
     const ctrl = V().setFromMatrixPosition(R.grip.matrixWorld);
     const inW = S.inL.clone().transformDirection(mesh.matrixWorld);
     const rel = ctrl.clone().sub(handle), push = rel.dot(inW), off = rel.addScaledVector(inW, -push).length();
-    // (a machete wedged in its kerf: drawn along its length, the edge slices on - chop.js)
+    // (a chopper wedged in its kerf: drawn along its length, the edge slices on - chop.js)
     const K = S.chop;
     let along = 0;
     if (K) {
@@ -918,6 +1055,20 @@ export class VRMode {
       if (S.lastAlong != null) along = a - S.lastAlong;
       S.lastAlong = a;
       if (Math.abs(along) > 0.05) along = 0; // (a jump: tracking, not a stroke)
+    }
+    // stabbed in (or stuck partway) with a cutting edge: drawn sideways, the edge cuts its way
+    // on through from inside instead of being pulled out (slicing/BladeCutter.js beginCut)
+    if (S.pierce && m.cutter) {
+      const lat = S.lastOff != null ? (off - S.lastOff) / Math.max(dt, 1e-3) : 0;
+      S.lastOff = off;
+      if (off > 0.045 && lat > 0.6) {
+        const A = S.actor, part = S.part;
+        m.unstick(false);
+        m.cutter.beginCut(A, part, lat);
+        this.buzz('right', 0.7, 40);
+        this.prevSeg = null;
+        return;
+      }
     }
     if (off > (K ? 0.28 : 0.2)) { this.ripOut(m); return; }
     // the grip of the flesh: a dead zone, then a lagging, speed-capped drag
@@ -940,6 +1091,17 @@ export class VRMode {
       if (Math.abs(along) > 0.002) this.buzz('right', Math.min(1, 0.2 + Math.abs(along) / dt * 0.25), 25);
       // the edge sinks as the kerf deepens
       S.max = Math.max(S.max, Math.min(K.r * 2.05, K.k * K.r * 2 + 0.02));
+    }
+    // a cutting edge stuck edge first (the swing ran out in them): pushed on, it cuts on through
+    if (m.cutter && !K && S.inL.z > 0.9 && dd > 0) {
+      S.vrAcc = (S.vrAcc || 0) + dd;
+      dd = 0;
+      if (S.vrAcc > 0.008) {
+        const go = S.vrAcc; S.vrAcc = 0;
+        this.buzz('right', 0.6, 35);
+        m.driveOn(go);
+        if (!m.stuckIn) { this.prevSeg = null; return; }
+      }
     }
     if (dd > 0 && S.depth + dd > S.max) {
       dd = Math.max(0, S.max - S.depth);
@@ -981,6 +1143,58 @@ export class VRMode {
     this.prevSeg = null;
   }
 
+  /**
+   * A cutting blade in the hand (slicing/BladeCutter.js): it doesn't go through the level - a
+   * wall, the floor, a car push it back out (along the surface's normal, so it slides along it),
+   * with a clank and a jolt the moment it meets it - and dragged through something tough it
+   * lags behind the hand, as if held back by it.
+   */
+  bladeWorld(m, dt) {
+    const mesh = m.mesh, cast = m.ctx.castSeg, C = m.cutter;
+    // held back by the flesh it's in: the blade only goes a share of the way the hand does each
+    // frame (more in bone), so it trails behind and you have to pull it through - up to a hand's
+    // breadth behind, then it comes along. Out of them, it catches back up to the hand.
+    m.cutLag ||= V();
+    const sp = m.tipVel.length(), hold = C.hold();
+    if (hold > 0 && m._bladeAt) {
+      // the hand's move this frame, from where the blade was
+      const want = _v.copy(mesh.position).sub(m._bladeAt);
+      // deeper in is fought: only so fast (flesh ~1.3 m/s, bone ~0.5) and only a share of it;
+      // drawing it back out the way it came goes easily
+      const dir = C.holdDir, inward = want.dot(dir);
+      if (inward > 0) {
+        const maxIn = (1.2 - hold * 1.05) * dt; // (flesh ~0.6 m/s, bone ~0.2)
+        const keep = Math.min(inward * (1 - hold * 0.75), maxIn);
+        want.addScaledVector(dir, keep - inward);
+      }
+      // sideways through the flesh (dragging the cut along) is held back too, less
+      const side = _w.copy(want).addScaledVector(dir, -want.dot(dir));
+      want.addScaledVector(side, -hold * 0.7);
+      const blade = m._bladeAt.clone().add(want);
+      m.cutLag.subVectors(blade, mesh.position).clampLength(0, 0.22);
+      // the strain of it, in the hand: harder the further it's held back
+      const now = performance.now();
+      if (now - (m._strainT || 0) > 50) { m._strainT = now; this.buzz('right', Math.min(1, 0.25 + m.cutLag.length() * 6), 45); }
+    } else m.cutLag.multiplyScalar(Math.exp(-dt * 14));
+    mesh.position.add(m.cutLag);
+    (m._bladeAt ||= V()).copy(mesh.position);
+    mesh.updateMatrixWorld(true);
+    if (!cast) return;
+    const hilt = _w.set(0, 0, 0).applyMatrix4(mesh.matrixWorld).clone();
+    const tip = V(0, m.def.seg[1] + 0.02, 0).applyMatrix4(mesh.matrixWorld);
+    const hit = cast(hilt, tip);
+    if (!hit) { m._wall = false; return; }
+    // out of it: the part of the blade past the surface, moved back to it
+    const depth = tip.clone().sub(hit.point).dot(hit.normal);
+    if (depth < 0) mesh.position.addScaledVector(hit.normal, -depth + 0.004);
+    mesh.updateMatrixWorld(true);
+    if (!m._wall && sp > 1.5) {
+      this.sfx?.(m.def.ground || 'clank', Math.min(1, 0.25 + sp / 14));
+      this.buzz('right', Math.min(1, 0.4 + sp / 12), 50);
+    }
+    m._wall = true;
+  }
+
   holdMelee(h, m, R, aR, pole, dt) {
     R.grip.matrixWorld.decompose(_p, _q, _s);
     _q.multiply(MELEE_ROT);
@@ -989,6 +1203,7 @@ export class VRMode {
     if (m.def.saw && m.sawOff) mesh.position.add(m.sawOff);
     mesh.quaternion.copy(_q);
     mesh.updateMatrixWorld(true);
+    if (m.cutter) this.bladeWorld(m, dt);
     const gm = mesh.matrixWorld;
     m.vel.copy(mesh.position).sub(m.lastPos).divideScalar(Math.max(dt, 1e-3));
     if (m.vel.length() > 30) m.vel.set(0, 0, 0);
@@ -1005,6 +1220,13 @@ export class VRMode {
     const a0 = P.a, b0 = P.b;
     m.tipVel.copy(b1).sub(b0).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 40);
     const fast = m.tipVel.length();
+    // a cutting edge (the machete): swept through whatever it's in, cut where it really went
+    // (slicing/BladeCutter.js); stalled or stabbed in, it's stuck there now (holdStuck)
+    if (m.cutter) {
+      m.cutter.haptic = (v, ms) => this.buzz('right', v, ms);
+      m.cutter.step(dt, { live: true, handVel: m.vel });
+      if (m.stuckIn) { this.prevSeg = null; return; }
+    }
     // the saw: worked back and forth for real, against whoever its teeth are on
     if (d.saw) {
       m.onSawStroke = (k) => this.buzz('right', Math.min(1, 0.35 + k * 0.4), 60);
@@ -1033,7 +1255,7 @@ export class VRMode {
       m.land(hit, a0, b0, a1, b1, dt, 1);
       m.swing = null;
       // (a knife stays in them till you pull it back out; anything else springs free)
-      if (m.stuckIn && !d.stab && !m.stuckIn.chop) m.unstick(true, true);
+      if (m.stuckIn && !d.stab && !m.stuckIn.chop && !m.stuckIn.pierce) m.unstick(true, true);
       if (m.stuckIn) this.prevSeg = null;
       this.hitSkip.set(hit.actor, performance.now());
       skip.add(hit.actor);

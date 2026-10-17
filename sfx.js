@@ -1,5 +1,5 @@
 import { settings } from './settings.js';
-const NAMES = ['shot', 'casing', 'magout', 'magin', 'rack', 'dry', 'impact', 'flesh', 'mag', 'whoosh', 'punch', 'bat', 'crowbar', 'chop', 'cash', 'buy', 'engine', 'crash', 'glass', 'horn', 'door', 'can', 'bin', 'bottle', 'brick', 'spray', 'kick', 'rifle', 'shotgun', 'pump', 'shell', 'molotov', 'fireloop', 'gas', 'cough', 'clank', 'scream', 'explosion', 'pin', 'mg', 'dmr', 'sniper', 'bolt', 'gib', 'clap', 'highfive', 'rocket', 'launch', 'groan', 'wave', 'button', 'crunch', 'laser', 'nuke', 'vomit', 'gulp', 'ball', 'slip', 'beep', 'jet', 'glitch', 'footstep1', 'footstep2', 'footstep3', 'footstepGrass', 'footstepSand', 'footstepGravel', 'footstepWood', 'footstepMetal', 'wasted', 'saw'];
+const NAMES = ['shot', 'casing', 'magout', 'magin', 'rack', 'dry', 'impact', 'flesh', 'mag', 'whoosh', 'punch', 'bat', 'crowbar', 'chop', 'cash', 'buy', 'engine', 'crash', 'glass', 'horn', 'door', 'can', 'bin', 'bottle', 'brick', 'spray', 'kick', 'rifle', 'shotgun', 'pump', 'shell', 'molotov', 'fireloop', 'gas', 'cough', 'clank', 'scream', 'explosion', 'pin', 'mg', 'dmr', 'sniper', 'bolt', 'gib', 'clap', 'highfive', 'rocket', 'launch', 'groan', 'wave', 'button', 'crunch', 'laser', 'nuke', 'vomit', 'gulp', 'ball', 'slip', 'beep', 'jet', 'glitch', 'footstep1', 'footstep2', 'footstep3', 'footstepGrass', 'footstepSand', 'footstepGravel', 'footstepWood', 'footstepMetal', 'wasted', 'saw', 'hack', 'rip', 'bonecrack', 'sever'];
 // sounds that reuse another clip: [clip, volume, playback rate]
 const ALIAS = { rackback: ['rack', 0.5, 1.25], pickup: ['magin', 0.35, 1.3], grab: ['punch', 0.28, 1.55], drop: ['mag', 1, 0.8], wood: ['bat', 0.55, 0.75], paper: ['whoosh', 0.25, 1.7], tick: ['casing', 0.35, 0.7], clang: ['crowbar', 0.8, 0.7] };
 
@@ -12,7 +12,7 @@ master.connect(ctx.destination);
 // a bus per kind of sound, each with its own slider (settings: vol*)
 const BUS_OF = {
   weapons: ['shot', 'casing', 'magout', 'magin', 'rack', 'rackback', 'dry', 'mag', 'rifle', 'shotgun', 'pump', 'shell', 'mg', 'dmr', 'sniper', 'bolt', 'rocket', 'launch', 'explosion', 'pin', 'molotov', 'gas', 'fireloop', 'laser', 'nuke', 'beep', 'jet'],
-  gore: ['flesh', 'splat', 'chop', 'crunch', 'gib', 'saw'],
+  gore: ['flesh', 'splat', 'chop', 'crunch', 'gib', 'saw', 'hack', 'rip', 'bonecrack', 'sever'],
   people: ['scream', 'cough', 'vomit', 'gulp', 'groan', 'clap', 'highfive', 'wave'],
   vehicles: ['engine', 'crash', 'horn', 'door', 'tyre', 'skid'],
 };
@@ -40,7 +40,7 @@ const last = {}, playing = {};
  * rate (pitch), vary (random pitch +-), voices (most at once of this clip), gap (min seconds
  * between starts), len (cut short: fades out over its last 40%).
  */
-const GORE = new Set(['flesh', 'splat', 'chop', 'crunch']);
+const GORE = new Set(['flesh', 'splat', 'chop', 'crunch', 'hack', 'rip', 'bonecrack', 'sever']);
 export function sfx(name, vol = 1, o = null) {
   if (GORE.has(name) && !settings.goreSounds) return;
   if (name === 'scream' && !settings.screams) return;

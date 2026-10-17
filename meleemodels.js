@@ -183,21 +183,50 @@ export function buildSledge() {
 /** Claw hammer: face on the striking side (+Z), the split claw curling back behind. */
 export function buildClawHammer() {
   const g = new THREE.Group();
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x1e1f22, roughness: 0.9 });
-  handle(g, -0.1, 0.24, 0.013, new THREE.MeshStandardMaterial({ color: 0x2f5fa8, roughness: 0.5 }));
-  const grip = mesh(new THREE.CylinderGeometry(0.0145, 0.0165, 0.13, 12), rubber, g);
-  grip.scale.set(0.85, 1, 1);
-  grip.position.y = -0.03;
-  const steel = iron();
-  const neck = mesh(new THREE.BoxGeometry(0.026, 0.036, 0.06), steel, g);
-  neck.position.set(0, 0.245, 0.012);
-  const face = mesh(new THREE.CylinderGeometry(0.016, 0.014, 0.04, 14), bright(), g);
-  face.rotation.x = Math.PI / 2;
-  face.position.set(0, 0.245, 0.058);
-  const claw = new THREE.CatmullRomCurve3([V(0, 0.245, -0.015), V(0, 0.25, -0.05), V(0, 0.238, -0.085), V(0, 0.215, -0.105)]);
-  for (const x of [0.006, -0.006]) {
-    const c = mesh(new THREE.TubeGeometry(claw, 12, 0.007, 6), steel, g);
-    c.position.x = x;
+  // hickory handle: a swelled grip, a flared butt, thinning up into the head
+  const wood = new THREE.MeshStandardMaterial({ color: 0xb98049, roughness: 0.55 });
+  const prof = [
+    [0, -0.118], [0.012, -0.117], [0.0175, -0.11], [0.0178, -0.098], [0.0155, -0.08], [0.0148, -0.04],
+    [0.0138, 0.02], [0.0118, 0.1], [0.0105, 0.17], [0.0112, 0.215], [0.0118, 0.232], [0, 0.233],
+  ].map(([r, y]) => new THREE.Vector2(r, y));
+  const h = mesh(new THREE.LatheGeometry(prof, 18), wood, g);
+  h.scale.set(0.78, 1, 1.05); // (an oval section, deeper than it is wide)
+  // a dark band of grip wrap near the butt
+  const wrap = mesh(new THREE.CylinderGeometry(0.0158, 0.0164, 0.075, 18, 1, true), new THREE.MeshStandardMaterial({ color: 0x1b1c20, roughness: 0.95 }), g);
+  wrap.scale.set(0.8, 1, 1.07);
+  wrap.position.y = -0.055;
+  const steel = new THREE.MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.42, metalness: 0.85 });
+  const polished = new THREE.MeshStandardMaterial({ color: 0xd6dadf, roughness: 0.18, metalness: 1 });
+  const Y = 0.247; // the head's centre line
+  // the eye: where the handle goes through, with a collar running down the handle
+  const eye = mesh(new THREE.BoxGeometry(0.025, 0.036, 0.034), steel, g);
+  eye.position.set(0, Y, 0.004);
+  const collar = mesh(new THREE.CylinderGeometry(0.0125, 0.0145, 0.026, 14), steel, g);
+  collar.scale.set(0.85, 1, 1.2);
+  collar.position.set(0, Y - 0.026, 0.004);
+  // the handle's wedged top, showing through the eye
+  const top = mesh(new THREE.BoxGeometry(0.016, 0.003, 0.024), wood, g);
+  top.position.set(0, Y + 0.0185, 0.004);
+  // the poll: a turned neck out to a round striking face (+Z)
+  const poll = [
+    [0, 0.018], [0.0128, 0.018], [0.0118, 0.03], [0.0105, 0.042], [0.0125, 0.055], [0.0158, 0.064], [0.0162, 0.07],
+  ].map(([r, z]) => new THREE.Vector2(r, z));
+  const p = mesh(new THREE.LatheGeometry(poll, 22).rotateX(Math.PI / 2), steel, g);
+  p.position.y = Y;
+  const face = mesh(new THREE.CylinderGeometry(0.0152, 0.0162, 0.004, 22).rotateX(Math.PI / 2), polished, g);
+  face.position.set(0, Y, 0.072);
+  // the claw: two curved, tapering tines with a V between them, sweeping back and down (-Z)
+  const s = new THREE.Shape();
+  s.moveTo(0.012, 0.016);
+  s.quadraticCurveTo(0.06, 0.02, 0.098, -0.03);   // the top, curling over
+  s.lineTo(0.093, -0.034);                          // the tip
+  s.quadraticCurveTo(0.058, -0.004, 0.012, -0.014); // the underside, back to the eye
+  s.closePath();
+  const clawGeo = new THREE.ExtrudeGeometry(s, { depth: 0.0075, bevelEnabled: true, bevelThickness: 0.0012, bevelSize: 0.0012, bevelSegments: 2, curveSegments: 14 });
+  clawGeo.rotateY(Math.PI / 2); // (shape x: out the back, -Z; extruded across, along X)
+  for (const x of [0.0022, -0.0097]) {
+    const c = mesh(clawGeo, steel, g);
+    c.position.set(x, Y, 0);
   }
   return g;
 }

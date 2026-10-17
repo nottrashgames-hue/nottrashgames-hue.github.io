@@ -241,7 +241,8 @@ export class Car {
         w.spin.updateMatrix();
       }
       if (this.S.motorcycle) M.steer.rotation.y = this.steerA * 0.65;
-      else M.steer.rotation.z = this.steerA * 5.5;
+      // (the wheel's z points away from the driver: a left turn is anticlockwise as they see it)
+      else M.steer.rotation.z = -this.steerA * 5.5;
     }
     // the car's subtree is skipped by the scene's own update (parked cars never move): do it here
     root.matrixWorldAutoUpdate = true;
@@ -281,9 +282,10 @@ export class Car {
     const inPlaneUp = up.addScaledVector(n, -up.dot(n)).normalize();
     const left = V(1, 0, 0).applyQuaternion(this.q);
     const turn = this.steerA * 5.5;
-    h.arms.forEach((a) => {
+    h.arms.forEach((a, i) => {
       const s = a.side;
-      const ang = s * 1.05 + turn;             // from the top of the rim, toward this hand's side
+      // from the top of the rim, toward this hand's side (or, in VR, wherever the hand took hold)
+      const ang = (h.wheelGrip?.[i] ?? s * 1.05) + turn;
       const c = this.toWorld(S.wheelC.x, S.wheelC.y, S.wheelC.z);
       const dir = V().addScaledVector(inPlaneUp, Math.cos(ang)).addScaledVector(left, Math.sin(ang) * 1).normalize();
       const pos = c.addScaledVector(dir, 0.19).addScaledVector(n, 0.035);
@@ -467,7 +469,8 @@ export class Vehicles {
   /** After the world was stepped: crashes, hits, seated bodies, models. */
   after(dt, actors, player) {
     this._player = player;
-    const cam = this.camera.position;
+    // (in the world: in VR the camera's own position is in the headset rig's frame)
+    const cam = this.camera.getWorldPosition(this._camW || (this._camW = V()));
     const budget = { n: 2 }; // car stain uploads this frame
     for (const c of this.cars) {
       c.read();

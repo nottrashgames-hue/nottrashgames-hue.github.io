@@ -29,8 +29,6 @@ export const SCHEMA = [
     { k: 'bloodColor', label: 'Blood colour', type: 'select', def: 'natural', opts: [['natural', 'Natural'], ['red', 'Red'], ['rotten', 'Brown'], ['gold', 'Gold'], ['brightgold', 'Yellow'], ['green', 'Green'], ['stark', 'Toxic green'], ['blue', 'Blue'], ['purple', 'Purple'], ['hotpink', 'Hot pink'], ['pink', 'Pink'], ['black', 'Black']] },
   ] },
   { name: 'Graphics', items: [
-    { k: 'fullbright', label: 'Full bright (no lighting)', def: false },
-    { k: 'shadows', label: 'Shadows', def: false },
     { k: 'fog', label: 'Fog', def: true },
   ] },
   { name: 'Audio', items: [
@@ -47,6 +45,8 @@ export const SCHEMA = [
 // Not in the menu any more (a headset can't reach them): always their base value, for the code
 // that still reads them.
 const FIXED = [
+    { k: 'fullbright', label: 'Full bright (no lighting)', def: true },
+    { k: 'shadows', label: 'Shadows', def: false },
     { k: 'charring', label: 'Burn charring', def: true },
     { k: 'fx', label: 'Fire, smoke & gas effects', def: true },
     { k: 'bloodAmount', label: 'Blood amount', type: 'range', def: 1, min: 0, max: 3, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
@@ -76,14 +76,6 @@ export const settings = {};
 for (const k in DEFS) {
   const d = DEFS[k], v = saved[k];
   settings[k] = v === undefined || typeof v !== typeof d.def || FIXED_K.has(k) ? d.def : v;
-}
-// (shadows went off by default for everyone: whatever was saved before, off once - turn them
-// back on in Settings and it sticks)
-settings.shadowsOff1 = !!saved.shadowsOff1; // (kept in every save from here on)
-if (!saved.shadowsOff1) {
-  settings.shadows = false;
-  settings.shadowsOff1 = true;
-  try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch { /* private mode */ }
 }
 
 const subs = {};

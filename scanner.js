@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildXray, xmat } from './xraybody.js';
+import { weaponName } from './wounds.js';
 
 /*
   VR medical scanner. Click the left stick: a pointer comes out of the left hand - aim it at
@@ -38,10 +39,18 @@ const _o = V(), _d = V(), _q = new THREE.Quaternion(), _s = V(), _p = V(), _m = 
 const WOUND_COL = { entry: 0xff2a2a, exit: 0xff8a2a, cut: 0xffd23a };
 const TRACE_COL = { gun: 0xffa040, stab: 0xffe060 };
 const HILITE = new THREE.Color(0xffe14a), HURT = new THREE.Color(0xff4436);
-// organ / vessel names the wounds report (organs.js) -> the x-ray's meshes
-const ORGAN_OF = { lungL: 'lungL', lungR: 'lungR', heart: 'heart', liver: 'liver', stomach: 'stomach', guts: 'guts', brain: 'brain' };
-const VESSEL_OF = { carotidL: ['carotidL'], carotidR: ['carotidR'], aorta: ['aorta'], iliac: ['iliacL', 'iliacR'],
-  femoralL: ['femoralL'], femoralR: ['femoralR'], poplitealL: ['poplitealL'], poplitealR: ['poplitealR'], brachialL: ['brachialL'], brachialR: ['brachialR'] };
+// what a hit reached (organs.js names) -> the x-ray's organ / vessels
+const ORGAN_OF = { brain: 'brain', heart: 'heart', liver: 'liver', stomach: 'stomach', guts: 'guts', lungL: 'lungL', lungR: 'lungR' };
+const VES_BASE = { carotid: 'carotid', iliac: 'iliac', femoral: 'femoral', popliteal: 'popliteal', brachial: 'brachial' };
+function vesselsOf(n) {
+  if (n === 'aorta') return ['aorta'];
+  const sd = /[LR]$/.test(n) ? n.slice(-1) : '', k = VES_BASE[sd ? n.slice(0, -1) : n];
+  return k ? (sd ? [k + sd] : [k + 'L', k + 'R']) : [];
+}
+// a body part's name on the monitor
+const PART_NAME = { head: 'Head', chest: 'Chest', spine: 'Abdomen', pelvis: 'Pelvis', upper: 'upper arm', fore: 'forearm', hand: 'hand', thigh: 'thigh', shin: 'shin', foot: 'foot' };
+const partName = (p) => PART_NAME[p] || (/[LR]$/.test(p) && PART_NAME[p.slice(0, -1)] ? p.slice(-1) + ' ' + PART_NAME[p.slice(0, -1)] : p);
+const STUCK_BLADE = 0xeaf6ff, STUCK_HILT = 0x9aa0b4;
 
 /** Distance from point p to segment a-b. */
 function segDist(p, a, b) {
@@ -183,6 +192,7 @@ export class Scanner {
   open(A) {
     this.build();
     if (this.bone) this.unlight(this.bone);
+    this.clearStuck();
     this.A = A;
     this.sig = '';
     this.bone = null;
@@ -198,6 +208,7 @@ export class Scanner {
 
   close() {
     this.picking = false; this.target = null; this.aimed = false;
+    this.clearStuck();
     this.A = null;
     if (this.mon) this.mon.removeFromParent();
     this.lasL.visible = this.lasR.visible = this.ring.visible = false;
@@ -293,7 +304,7 @@ export class Scanner {
   refresh() {
     const A = this.A, X = this.x;
     const wounds = A.wounds?.wounds || [], traces = A.wounds?.traces || [], frac = A.organs?.fractures;
-    const sig = wounds.length + '|' + traces.length + '|' + (frac?.size || 0);
+    const sig = wounds.length + '|' + traces.length + '|' + (frac?.size || 0) + '|' + (A.wounds?.ver || 0);
     if (sig === this.sig) return;
     this.sig = sig;
     for (const m of this.marks) { m.removeFromParent(); m.geometry !== this._dot && m.geometry.dispose(); m.material.dispose(); }
@@ -345,7 +356,7 @@ export class Scanner {
     }
     const hitNames = new Set(traces.flatMap((t) => t.hits));
     this.badOrgans = [...hitNames].map((n) => X.organs[ORGAN_OF[n]]).filter(Boolean);
-    this.badVessels = [...hitNames].flatMap((n) => (VESSEL_OF[n] || []).flatMap((k) => X.vessels[k] || []));
+    this.badVessels = [...hitNames].flatMap((n) => vesselsOf(n).flatMap((k) => X.vessels[k] || []));
     // colours back, then the damage on top
     for (const b of X.bones) b.userData.mat.uniforms.c.value.copy(b.userData.mat.userData.base);
     for (const k in X.organs) { const u = X.organs[k].material.uniforms; u.c.value.copy(X.organs[k].material.userData.base); u.a.value = 0.42; }
@@ -395,6 +406,7 @@ export class Scanner {
     if (grip && this.mon.parent !== grip) { grip.add(this.mon); this.mon.position.copy(MOUNT_POS); this.mon.quaternion.copy(MOUNT_Q); }
     this.mon.updateMatrixWorld(true);
     this.refresh();
+    this.showStuck();
     this.statT -= 1 / 60;
     if (this.statT <= 0) { this.statT = 0.25; this.stats(); this.history(); }
     // naming bones: the right trigger held, the ray on the monitor
@@ -468,6 +480,8 @@ export class Scanner {
     g.fillText(O.volume.toFixed(1) + ' / ' + O.maxVol.toFixed(1) + ' L', 18, y);
     y += 40;
     // the rest, a row each
+    const ST = A.wounds?.stuck || [];
+    const RH = ST.length ? 33 : 38;
     const row = (k, v, col) => {
       g.font = '500 24px system-ui, sans-serif';
       g.fillStyle = DIM;
@@ -477,7 +491,7 @@ export class Scanner {
       g.fillStyle = col;
       g.fillText(v, c.width - 18, y);
       g.textAlign = 'left';
-      y += 38;
+      y += RH;
     };
     const dead = !!b?.dead;
     const W = A.wounds?.wounds || [];
@@ -517,6 +531,9 @@ export class Scanner {
     row('Gunshots', String(nGun), nGun ? RED : GRN);
     row('Stab wounds', String(nStab), nStab ? RED : GRN);
     if (nCut > nStab) row('Cuts', String(nCut - nStab), AMB);
+    // what's still in them, where, and how deep
+    for (const it of ST.slice(0, 3)) row(weaponName(it.w) + ' in', partName(it.part) + ' ' + Math.max(1, Math.round(it.depth * 100)) + ' cm', RED);
+    if (ST.length > 3) row('', '+' + (ST.length - 3) + ' more stuck in', RED);
     if (O.fit && !dead) row('Vomiting', O.fit.bloody ? 'Blood' : 'Yes', O.fit.bloody ? RED : AMB);
     this.stex.needsUpdate = true;
   }
@@ -564,6 +581,50 @@ export class Scanner {
     });
     this.htex.needsUpdate = true;
   }
+
+  /**
+   * Whatever's stuck in them (wounds.js trackStuck), drawn on the x-ray where it really is: the
+   * blade bright, the hilt dim - followed live as it's driven in, twisted or worked loose.
+   */
+  showStuck() {
+    const X = this.x, L = this.A.wounds?.stuck || [];
+    const M = (this.stuckM ||= new Map()), live = new Set();
+    this._cyl ||= new THREE.CylinderGeometry(1, 1, 1, 6, 1);
+    for (const it of L) {
+      const P = X.parts[it.part];
+      if (!P) continue;
+      live.add(it.S);
+      let mk = M.get(it.S);
+      if (mk && mk.parent !== P) { this.dropStuck(mk); mk = null; }
+      if (!mk) {
+        mk = new THREE.Group();
+        for (const col of [STUCK_BLADE, STUCK_HILT]) {
+          const c = new THREE.Mesh(this._cyl, xmat(col, { a: 0.95, f: 0.9, base: 0.95, add: true, dt: false, dw: false }));
+          c.renderOrder = 12;
+          mk.add(c);
+        }
+        P.add(mk);
+        M.set(it.S, mk);
+      }
+      // (the weapon's a child of the part it's in: its own matrix is in the part's frame)
+      const m = it.w.mesh, d = it.w.def;
+      m.updateMatrix();
+      const r = Math.max(0.004, (d.r || 0.015) * 0.45);
+      this.placeSeg(mk.children[0], V(0, d.seg[0], 0).applyMatrix4(m.matrix), V(0, d.seg[1], 0).applyMatrix4(m.matrix), r);
+      this.placeSeg(mk.children[1], V(0, d.seg[0] - 0.11, 0).applyMatrix4(m.matrix), V(0, d.seg[0], 0).applyMatrix4(m.matrix), r * 1.4);
+    }
+    for (const [S, mk] of M) if (!live.has(S)) { this.dropStuck(mk); M.delete(S); }
+  }
+  placeSeg(c, a, b, r) {
+    const len = a.distanceTo(b);
+    c.visible = len > 1e-4;
+    if (!c.visible) return;
+    c.position.copy(a).add(b).multiplyScalar(0.5);
+    c.quaternion.setFromUnitVectors(V(0, 1, 0), b.sub(a).normalize());
+    c.scale.set(r, len, r);
+  }
+  dropStuck(mk) { mk.removeFromParent(); for (const c of mk.children) c.material.dispose(); }
+  clearStuck() { if (this.stuckM) { for (const mk of this.stuckM.values()) this.dropStuck(mk); this.stuckM.clear(); } }
 
   unlight(b) {
     const U = b.userData;

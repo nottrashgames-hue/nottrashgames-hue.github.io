@@ -68,10 +68,32 @@ export class Arteries {
       j.obj.updateWorldMatrix(true, false);
       const p = j.obj.localToWorld(_p.copy(j.lp));
       const d = _d.copy(j.ln).transformDirection(j.obj.matrixWorld);
-      const n = bloodCount(beat > 0.3 ? 3 : Math.random() < 0.35 ? 1 : 0);
-      if (!n) continue;
-      B.inked(A).spray(p, d, (0.6 + 4.2 * beat) * Math.min(1.3, k), n, 0.1 + (1 - beat) * 0.2, rnd(0.9, 1.3));
+      // the stream: a steady, tight run of heavy drops along one arc - surging out far on each
+      // beat, sagging back between - so it reads as a single rope of blood that rains down and
+      // pools where it lands
+      const surge = 0.35 + 0.65 * beat;
+      const speed = (1.1 + 3.4 * beat) * Math.min(1.4, 0.55 + 0.45 * k);
+      j.acc = (j.acc || 0) + dt * (60 + 110 * beat) * Math.min(1.4, k) * surge;
+      let m = bloodCount(Math.floor(j.acc));
+      j.acc -= Math.floor(j.acc);
+      // (the body's own motion carries the stream with it)
+      const pw = j.obj.getWorldPosition(_w);
+      const mv = j.last ? _v.subVectors(pw, j.last).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 6) : _v.set(0, 0, 0);
+      (j.last ||= V()).copy(pw);
+      for (; m > 0; m--) {
+        // (a sliver of wobble, so it isn't a laser - the stream twists a little as it goes)
+        const wob = 0.035 + 0.04 * (1 - beat);
+        _q.copy(d);
+        _q.x += rnd(-wob, wob); _q.y += rnd(-wob, wob) * 0.6; _q.z += rnd(-wob, wob);
+        _q.normalize().multiplyScalar(speed * rnd(0.93, 1.05)).add(mv);
+        // (emitted a little way along the jet: one frame's drops strung out, no clumps)
+        _s.copy(p).addScaledVector(_q, rnd(0, dt));
+        B.inked(A).drip(_s, _q, rnd(0.006, 0.0085) * Math.min(1.25, 0.8 + 0.3 * k));
+      }
+      // and a spit of fine spray off it as each beat hits
+      if (beat > 0.6 && !j.spat) { j.spat = true; B.inked(A).spray(p, d, speed * 0.9, bloodCount(4), 0.18, rnd(0.9, 1.3)); }
+      if (beat < 0.2) j.spat = false;
     }
   }
 }
-const _p = V(), _d = V();
+const _p = V(), _d = V(), _q = V(), _s = V(), _w = V(), _v = V();

@@ -266,10 +266,12 @@ export class Organs {
   /** A vampire (look.vampire, vampire.js): no organ harm at all, and it bleeds slowly. */
   get vamp() { return !!this.actor.hero?.look?.vampire; }
 
-  shot(entry, dir, exit) {
+  shot(entry, dir, exit, skip = null) {
     if (this.vamp) return { lethal: false, bleed: 0.5, down: false, hits: [] };
     const end = exit || entry.clone().addScaledVector(dir, 0.35);
-    const hits = this.trace(entry.clone().addScaledVector(dir, -0.01), end.clone().addScaledVector(dir, 0.01));
+    let hits = this.trace(entry.clone().addScaledVector(dir, -0.01), end.clone().addScaledVector(dir, 0.01));
+    // (a blade going on deeper down its own track: what it's already through isn't hurt again)
+    if (skip) { hits = hits.filter((o) => !skip.has(o.name)); if (!hits.length) return { lethal: false, bleed: 1, down: false, hits: [] }; }
     const S = this.state;
     const out = { lethal: false, bleed: 1, down: false, hits: hits.map((o) => o.name) };
     this.nausea += 0.12; // (any wound: the shock of it turns the stomach a little)
@@ -502,6 +504,8 @@ export class Organs {
   }
 
   canRise() {
+    // (main.js: the player gets up whatever's wrong with them - the injuries stay, they just don't keep you down)
+    if (this.actor.alwaysRise) return !this.actor.brain.dead;
     if (this.undead) return !this.state.noRise && !this.state.out && !this.actor.brain.dead && this.blood > 0.12;
     return !this.state.noRise && !this.state.out && !this.actor.brain.dead && this.blood > 0.66 && this.state.dieT < 0; }
   /** Can this arm (0 = L, 1 = R) hold something? */
@@ -568,7 +572,7 @@ export class Organs {
       }
     }
     // standing up while you can't: down you go
-    if (A.mode === 'anim' && (S.out || S.dieT >= 0 || S.brokenLeg || S.limp.has('thighL') || this.blood < (this.undead ? 0.12 : 0.62))) A.goRagdoll('collapse');
+    if (A.mode === 'anim' && !A.alwaysRise && (S.out || S.dieT >= 0 || S.brokenLeg || S.limp.has('thighL') || this.blood < (this.undead ? 0.12 : 0.62))) A.goRagdoll('collapse');
     // a useless arm lets go of the gun
     if (A.gunHeld && S.armOut[1]) A.gunHeld.drop();
     this.apply();
@@ -700,6 +704,10 @@ export class Organs {
     this.total = 0;
     this.nausea = 0; this.vomitCD = 0; this.fit = null; this.gutBlood = false;
     this.wakeT = undefined;
+    // (a fit still pending from before - a knock's, a starved brain's - goes too: none right after a reset)
+    this.fitSoon = undefined;
+    this.hypT = undefined;
+    this.fitT = rnd(8, 30);
     this.state = {
       limp: new Set(), noRise: false, lung: 0, gut: 0, pain: 0,
       armOut: [false, false], dieT: -1, out: false,
@@ -714,7 +722,7 @@ export class Organs {
 
   die() {
     const b = this.actor.brain;
-    if (b.dead || this.actor.god) return;
+    if (b.dead || this.actor.god || this.actor.invincible) return;
     b.dead = true;
     // (what killed it, for the medical scanner)
     this.cause = this.brainDeath || this.brainDmg > 0.45 ? 'brain' : this.blood < 0.32 ? 'blood' : this.state.dieT >= 0 ? 'heart' : 'other';

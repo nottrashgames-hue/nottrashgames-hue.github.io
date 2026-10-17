@@ -7,6 +7,8 @@ import { chopHit, kerfDepth } from './chop.js';
 import { settings } from './settings.js';
 import { SwingTrail } from './trail.js';
 import { WeaponBlood } from './weaponblood.js';
+import { BladeCutter } from './slicing/BladeCutter.js';
+import { limbOf } from './slicing/Sliceable.js';
 import { inkOf } from './inks.js';
 
 /*
@@ -275,8 +277,8 @@ export const WEAPONS = {
     hit: { kind: 'blunt', mass: 3.2, sev: 1.2, ref: 11, maxImp: 85 }, seg: [0.12, 0.5], r: 0.022, sound: 'crowbar', ground: 'clang', stuck: 0.12, bounce: 0.05,
     box: [0.014, 0.33, 0.06], off: V(0, 0.16, -0.04), rest: 0.012, massKg: 1.4 },
   // edges: sharp on one side (+Z) or both; cleave: how readily it goes right through a limb
-  // chop: it cuts in, a kerf deeper with every blow, rather than clean through in one (chop.js)
-  machete: { build: buildMachete, ready: ONE_READY, swings: ONE, low: ONE_LOW, back: 0.32, chopR: 0.12, edges: 1, cleave: 1, chop: true,
+  // (the machete: cut by the blade's real sweep through the mesh - slicing/BladeCutter.js; none of the paths below)
+  machete: { build: buildMachete, ready: ONE_READY, swings: ONE, low: ONE_LOW, back: 0.32, chopR: 0.12, edges: 1, cleave: 1, cutter: true, carve: true,
     hit: { kind: 'blade', mass: 2.2, sev: 1.05, ref: 10, maxImp: 60 }, seg: [0.1, 0.54], r: 0.022, sound: 'chop', ground: 'chop', stuck: 0.3, bounce: 0.012,
     box: [0.012, 0.3, 0.028], off: V(0, 0.22, 0.012), rest: 0.017, massKg: 0.6 },
   // two-handed: right hand under the guard, left toward the pommel; long level cuts
@@ -292,7 +294,9 @@ export const WEAPONS = {
     box: [0.014, 0.18, 0.08], off: V(0, 0.07, 0), rest: 0.014, massKg: 0.7 },
   // stabs, point first; it never cuts a limb off (noCut)
   // (point first and fast enough it goes in and stays in - little shove: it pierces, it doesn't knock about)
-  knife: { build: buildHuntingKnife, ready: ONE_READY, swings: STAB, low: STAB_LOW, back: 0.2, chopR: 0.12, edges: 1, cleave: 0.45, stab: true, noCut: true,
+  // (a cutter too: slashes and stabs open real cuts in the mesh, shallow (maxCut: how far in, of the limb's thickness) and following the stroke in
+  // 3D - carve - but never right through; stuck in, a fresh shove drives it on - melee.js shove)
+  knife: { build: buildHuntingKnife, ready: ONE_READY, swings: [ONE[0], STAB[0], ONE[1], STAB[1]], low: STAB_LOW, back: 0.2, chopR: 0.12, edges: 1, cleave: 0.45, stab: true, noCut: true, maxCut: 0.22, cutter: true, carve: true,
     hit: { kind: 'blade', mass: 0.45, sev: 1.1, ref: 7, maxImp: 14 }, seg: [0.06, 0.25], r: 0.015, sound: 'chop', ground: 'chop', stuck: 0.35, bounce: 0.01,
     box: [0.012, 0.16, 0.025], off: V(0, 0.095, 0.004), rest: 0.012, massKg: 0.3 },
   // a pencil: stabbed in like the knife, point first - shorter, blunter, it goes in less readily and hurts less
@@ -380,8 +384,12 @@ export class Melee {
     this.O = V(); this.yq = Q();
     this.trail = new SwingTrail(scene);
     this.blood = new WeaponBlood(this.mesh, this.def, ctx.blood);
+    // (def.cutter: the edge from BladeBase to BladeTip, cutting wherever it really goes - slicing/)
+    if (this.def.cutter) this.cutter = new BladeCutter(this, { base: this.def.seg[0], tip: this.def.seg[1] + 0.02, thickness: this.def.r,
+      edges: this.def.edges || 1, power: this.def.cleave || 1, minSpeed: 1.6 });
     // (stuck in someone, it's a child of their part: never cut along with them - slice.js)
     this.mesh.userData.notBody = true;
+    this.mesh.userData.melee = this; // (wounds.js: what's stuck in a body, and how deep)
   }
 
   /** Back on the table where it started. Call after debris.clear(). */
@@ -481,6 +489,7 @@ export class Melee {
     this.state = 'loose';
     this.swing = this.chop = this.btn = null;
     this.trail.cut();
+    this.cutter?.reset();
     if (S && this.ctx.throws && this.mesh.parent) { this.state = 'embed'; this.embed = S; this.ctx.throws.adopt(S); return; }
     if (S) this.unstick(false, true);
     this.mesh.updateMatrixWorld(true);
@@ -510,6 +519,8 @@ export class Melee {
     const B = this.btn;
     this.btn = null;
     if (!B || this.state !== 'held' || this.def.saw) return;
+    // stuck in someone: a tap puts your weight behind it again and drives the edge on through
+    if (this.stuckIn) { if (this.cutter && B.t <= HOLD) this.shove(); return; }
     if (this.chop?.phase === 'cock') { this.chop.go = true; return; }
     if (B.t <= HOLD || !this.chop) this.attack(style);
   }
@@ -736,7 +747,8 @@ export class Melee {
     else if (this.swing) {
       const S = this.swing;
       // (a saw in the cut drags: the strokes go slower through flesh)
-      S.t += sdt * (d.saw ? this.sawDrag ?? 1 : 1);
+      // (a cutter in flesh: the swing slows through it - bone slows it most)
+      S.t += sdt * (d.saw ? this.sawDrag ?? 1 : 1) * (this.cutter ? Math.max(0.06, 1 - this.cutter.hold() * 1.2) : 1);
       sample(S.keys, Math.min(S.t, S.dur), c);
       if (c.live && !S.whoosh) { S.whoosh = true; this.ctx.sfx?.('whoosh', 0.5); }
       if (S.t >= S.dur) {
@@ -828,6 +840,8 @@ export class Melee {
 
     // contact: the business end, swept from last frame (the chop does its own, above)
     const a1 = V(0, d.seg[0], 0).applyMatrix4(gm), b1 = V(0, d.seg[1], 0).applyMatrix4(gm);
+    // the cutting edge, swept through whatever it's in (slicing/BladeCutter.js)
+    if (this.cutter && !this.stuckIn) this.cutter.step(dt, { live: !!(this.swing || this.chop?.phase === 'fall') && c.live });
     if (this.prevSeg) this.tipVel.copy(b1).sub(this.prevSeg[1]).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 40);
     if (d.saw) this.sawDrag = sawStep(this, A, dt, this.ctx.actors, c.live && !!this.swing);
     else if (this.swing && c.live && this.prevSeg) {
@@ -866,20 +880,116 @@ export class Melee {
     this.prevSeg = [a1, b1];
   }
 
+  /** BladeCutter: the point went into a person first (a stab): it pierces and stays in. */
+  cutterStab(C, vel) {
+    const T = C.T;
+    if (T.kind !== 'actor' || T.A.remote || !T.A.groups?.[T.part] || !this.owner || vel.length() < 1.5) return;
+    const axis = V().subVectors(this.cutter.b, this.cutter.a).normalize();
+    const n = vel.clone().normalize().negate();
+    T.A.wounds?.stab(T.part, C.entry, n, vel.clone(), axis, 0.6);
+    this.stickIn({ actor: T.A, part: T.part, point: C.entry, normal: n }, vel, axis, 1, null, true);
+    this.stuckIn.pierce = true; // (vr.js holdStuck: drawn sideways, the edge cuts its way out)
+    this.stuckIn.cut = null;    // (shoved: the edge cuts on from here - shove)
+    this.ctx.sliceFx?.stab(this.cutter, C, vel.length());
+  }
+  /**
+   * Stuck in them with a cutter: one more push behind it. The blade goes on edge first, as far
+   * as the tissue lets one shove take it, cutting the mesh open as it goes (BladeCutter.carve);
+   * all the way through, the part comes off and the blade's free.
+   */
+  shove() {
+    const S = this.stuckIn, m = this.mesh;
+    if (!S || !this.cutter || m.parent !== S.g) return;
+    const part = S.cut?.T.part || S.part;
+    const res = (limbOf(part)?.resistance || 3) * (/^(pelvis|spine|chest)$/.test(part) ? 1.5 : 1);
+    this.driveOn(clamp(0.13 * (this.def.cleave || 1) / res, 0.012, 0.045), part);
+    this.stop = 0.06;
+    this.ctx.sfx?.('hack', 0.55, { rate: rnd(0.85, 1.05) });
+    this.ctx.sfx?.('flesh', 0.6, { rate: rnd(0.75, 0.95) });
+    this.ctx.shake?.(0.05, this.owner);
+  }
+  /** The stuck blade driven dd further on, edge first (a shove; in VR, the hand pushing it on - vr.js). */
+  driveOn(dd, part = this.stuckIn?.cut?.T.part || this.stuckIn?.part) {
+    const S = this.stuckIn, m = this.mesh;
+    if (!S || !this.cutter || m.parent !== S.g) return;
+    // edge first, in the part's frame (the weapon's a child of it now)
+    m.position.addScaledVector(V(0, 0, 1).applyQuaternion(m.quaternion), dd);
+    m.updateMatrixWorld(true);
+    // (stuck edge first: it's that much deeper in to pull back out of)
+    if (S.inL.z > 0.9) { S.depth += dd; S.max = Math.max(S.max || 0, S.depth); }
+    S.t = 0;
+    const C = this.cutter.carve(S.cut, S.actor, part, dd);
+    if (C) { S.cut = C; return; }
+    // through (or the part's gone): the blade comes free
+    if (this.stuckIn === S) this.unstick(false);
+  }
+  /**
+   * Stuck in them with a cutter: turned toward `target` (the world rotation the hand wants it at)
+   * slowly - the deeper it's in, the harder the flesh holds it - pivoting about the point of the
+   * edge that's in them, so it carves round as it turns (BladeCutter.carve).
+   */
+  twistStuck(target, dt) {
+    const S = this.stuckIn, m = this.mesh, d = this.def;
+    if (!S || !this.cutter || m.parent !== S.g || S.chop) return;
+    m.updateMatrixWorld(true);
+    const cq = m.getWorldQuaternion(Q());
+    const ang = cq.angleTo(target);
+    if (ang < 0.004) return;
+    const step = Math.min(ang, dt * 1.3 / (1 + S.depth * 6));
+    const nq = cq.clone().rotateTowards(target, step);
+    const s = S.cut?.s0 ?? 0.6;
+    const pivot = V(0, lerp(d.seg[0], d.seg[1], s), 0).applyMatrix4(m.matrixWorld);
+    const tip0 = V(0, d.seg[1], 0).applyMatrix4(m.matrixWorld);
+    const wpos = V().setFromMatrixPosition(m.matrixWorld);
+    wpos.sub(pivot).applyQuaternion(nq.clone().multiply(cq.clone().invert())).add(pivot);
+    S.g.updateWorldMatrix(true, false);
+    m.position.copy(S.g.worldToLocal(wpos));
+    m.quaternion.copy(S.g.getWorldQuaternion(Q()).invert().multiply(nq));
+    m.updateMatrixWorld(true);
+    // how far it's cut on: the tip end of the edge swung the way the edge faces
+    const tip1 = V(0, d.seg[1], 0).applyMatrix4(m.matrixWorld);
+    const fwd = Math.max(0, tip1.sub(tip0).dot(V(0, 0, 1).applyQuaternion(nq))) * 0.6;
+    S.twA = (S.twA || 0) + step; S.twF = (S.twF || 0) + fwd;
+    if (S.twA < 0.06 && S.twF < 0.01) return;
+    const dd = S.twF;
+    S.twA = S.twF = 0;
+    this.cutter.haptic?.(0.35, 30);
+    this.ctx.sfx?.('flesh', 0.25 + Math.min(0.4, dd * 20), { rate: rnd(0.8, 1.1) });
+    const C = this.cutter.carve(S.cut, S.actor, S.cut?.T.part || S.part, dd);
+    if (C) S.cut = C;
+    else if (this.stuckIn === S) this.unstick(false);
+  }
+  /** BladeCutter: dragging through tough stuff - a swing (not a hand: vr.js lags the blade) slows. */
+  cutterDrag(res) { /* (no hit-stop: the stroke stays smooth and yours - vr.js lags the blade instead) */ }
+  /** BladeCutter: the swing ran out of push inside them - the blade stops there, stuck in. */
+  cutterStall(C) {
+    const T = C.T;
+    this.stop = 0.06;
+    if (T.kind === 'actor' && !T.A.remote && T.A.groups?.[T.part] && this.owner) {
+      const axis = V().subVectors(this.cutter.b, this.cutter.a).normalize();
+      this.stickIn({ actor: T.A, part: T.part, point: C.last, normal: C.vel.clone().normalize().negate(), inPlace: true, depth: clamp(C.depth || 0.03, 0.02, 0.22) }, C.vel, axis, 1, null, false);
+      this.stuckIn.pierce = true;
+      this.stuckIn.cut = C;     // (shoved again: the same cut carries on - shove)
+      return;
+    }
+    if (this.swing && this.swing.style !== 'recover') this.recover(this.def.back + 0.15);
+  }
+
   /** The blade bit in and stuck: fixed into the part it hit, still in our hand. */
-  stickIn(hit, vel, axis, power, kerf = null) {
-    const A = hit.actor, g = A.groups[hit.part], m = this.mesh, d = this.def;
+  stickIn(hit, vel, axis, power, kerf = null, pointFirst = !!this.def.stab) {
+    const A = hit.actor, g = A.groups[hit.part], m = this.mesh, d = { ...this.def, stab: pointFirst };
     // the way in: point first for a stab, edge first for a cut
     const inL = d.stab ? V(0, 1, 0) : V(0, 0, 1);
     m.updateMatrixWorld(true);
     const inW = inL.clone().applyQuaternion(m.quaternion);
-    const depth = kerf ? kerfDepth(kerf) : clamp(vel.length() * (d.stab ? 0.016 : 0.0055) * Math.sqrt(power), d.stab ? 0.06 : 0.03, d.stab ? (d.seg[1] - d.seg[0]) * 0.85 : 0.065);
+    const depth = hit.inPlace ? hit.depth : kerf ? kerfDepth(kerf) : clamp(vel.length() * (d.stab ? 0.016 : 0.0055) * Math.sqrt(power), d.stab ? 0.06 : 0.03, d.stab ? (d.seg[1] - d.seg[0]) * 0.85 : 0.065);
     const lead = d.stab ? V(0, d.seg[1], 0) : V(0, lerp(d.seg[0], d.seg[1], 0.6), 0.03);
     lead.applyMatrix4(m.matrixWorld);
     // a stab: only the tip's in at first - it's driven the rest of the way against the flesh
     // (poseStuck: on its own; in VR the hand pushes it, vr.js holdStuck)
     const start = d.stab ? Math.min(depth, 0.015) : depth;
-    m.position.addScaledVector(inW, V().subVectors(hit.point, lead).dot(inW) + start);
+    // (a cutter that ran out of push: it's already in them, right where it stopped)
+    if (!hit.inPlace) m.position.addScaledVector(inW, V().subVectors(hit.point, lead).dot(inW) + start);
     m.updateMatrixWorld(true);
     g.attach(m);
     // (throw.js's shape: let go of it and it's held in them the same way a thrown blade is)
@@ -913,6 +1023,18 @@ export class Melee {
       curl(h.arms[0], 1.6);
     }
     if (A.vrSelf) return; // (in VR the hand works it in and out itself: vr.js holdStuck)
+    // a cutter: turn (and look up / down, aiming) and the blade turns in them with you, cutting round
+    if (this.cutter && A === this.ctx.player && !S.chop) {
+      let pitch = 0;
+      if (this.ctx.aiming?.() && this.ctx.aimPoint) {
+        _to.copy(this.ctx.aimPoint).sub(this.O).applyQuaternion(_q.copy(this.yq).invert());
+        if (_to.z > 0.2) pitch = clamp(Math.atan2(-_to.y, Math.hypot(_to.x, _to.z)), -0.6, 0.6);
+      }
+      const frame = this.yq.clone().multiply(_pitchQ.setFromAxisAngle(_X, pitch));
+      if (!S.refQ) { S.refQ = frame.clone().invert().multiply(m.getWorldQuaternion(Q())); }
+      this.twistStuck(frame.multiply(S.refQ), dt);
+      if (this.stuckIn !== S) return;
+    }
     // still going in: driven home against the flesh, slowing as it goes deeper
     if (S.goal != null && S.depth < S.goal) {
       const dd = Math.min(S.goal - S.depth, dt * (0.9 - 4 * S.depth));
@@ -921,7 +1043,8 @@ export class Melee {
       return;
     }
     S.goal = null;
-    const pulling = A === this.ctx.player ? !!this.btn : S.t > 0.4;
+    // (a cutter: a tap shoves it on, holding the button works it back out)
+    const pulling = A === this.ctx.player ? !!this.btn && (!this.cutter || this.btn.t > HOLD) : S.t > 0.4;
     // leaning back into it
     const k = Math.min(1, dt * 6);
     h.twist = lerp(h.twist || 0, pulling ? -0.15 : 0, k); h.bend = lerp(h.bend || 0, pulling ? -0.12 : 0.08, k); h.dip = lerp(h.dip || 0, pulling ? 0.12 : 0, k);
@@ -943,7 +1066,7 @@ export class Melee {
         this.ctx.shake?.(0.02 * strain, A);
         // the body gets hauled toward us with each one
         const V2 = S.actor;
-        if (!V2.remote && V2.mode === 'ragdoll' && !V2.pending) {
+        if (!d.stab && !V2.remote && V2.mode === 'ragdoll' && !V2.pending) {
           V2.pending = { imp: _v1.subVectors(_sh, grip).setY(0).normalize().multiplyScalar(6 * strain).clone(), part: S.part, point: grip.clone() };
         }
       }
@@ -954,6 +1077,7 @@ export class Melee {
   unstick(rip = true, keep = false) {
     const S = this.stuckIn || this.embed;
     this.stuckIn = null;
+    this.cutter?.reset(); // (it's moved while stuck: no sweep from where it went in)
     if (!S) return;
     const m = this.mesh, d = this.def;
     m.updateMatrixWorld(true);
@@ -968,8 +1092,10 @@ export class Melee {
       this.ctx.sfx?.('flesh', 0.8, { rate: 0.75 });
       this.blood.add(tip, 0.8, inkOf(A));
       if (!A.remote && !A.brain.dead) {
-        if (A.mode === 'anim') A.goRagdoll('stumble', { balance: 0.7, decay: 0.35 });
-        A.pending = { imp: outW.clone().setY(0.2).normalize().multiplyScalar(22), part: S.part, point: tip };
+        if (!d.stab) {
+          if (A.mode === 'anim') A.goRagdoll('stumble', { balance: 0.7, decay: 0.35 });
+          A.pending = { imp: outW.clone().setY(0.2).normalize().multiplyScalar(22), part: S.part, point: tip };
+        }
         A.onPain?.(S.part, 'pain', 0.7);
       }
     }
@@ -1015,13 +1141,15 @@ export class Melee {
     const thrust = !!this.def.stab && axis.dot(_v1.copy(vel).normalize()) > 0.5;
     // (a chop brings the whole body's weight down with it: it shoves harder too)
     hit.actor.struck(hit.part, hit.point, vel, hit.normal,
-      { ...this.def.hit, axis, sev: this.def.hit.sev * power, maxImp: this.def.hit.maxImp * Math.sqrt(power),
+      { ...this.def.hit, axis, sev: this.def.hit.sev * power, maxImp: this.def.hit.maxImp * Math.sqrt(power) * (this.def.cutter ? 0.25 : 1),
         dent: power, shaft: this.def.seg[1] - this.def.seg[0] > 0.25, stab: thrust, harmless: !!this.def.harmless,
+        noPush: !!this.def.stab || !!this.def.cutter, // (the machete too: it goes into them, it doesn't shove)
         label: this.wtype.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase()) }, this.owner);
     // edge-first and fast enough: straight through the limb, cut where it met (slice.js)
     const edge = V(0, 0, 1).applyQuaternion(this.mesh.quaternion);
     let cut = false, kerf = null;
-    if (blade && !this.def.harmless && !this.def.noCut) {
+    let slicing = false;
+    if (blade && !this.def.harmless && !this.def.noCut && !this.def.cutter) {
       if (this.def.chop) {
         // a chopper: into the limb, a kerf deeper each blow, off when it's through (chop.js)
         const r = this.ctx.dismember && settings.dismember ? chopHit(this, hit, vel, axis, edge, power) : null;
@@ -1035,8 +1163,9 @@ export class Melee {
     // (a chopper that cut in: wedged in its kerf - always in a headset, where you can lean on it
     // and carry on cutting; now and then otherwise)
     const pointIn = thrust && vel.length() > 3;
-    if (kerf && hit.actor.groups?.[kerf.part] && (this.owner?.vrSelf || Math.random() < 0.3)) this.stickIn({ ...hit, part: kerf.part }, vel, axis, power, kerf);
-    else if (blade && !this.def.harmless && !cut && !kerf && hit.actor.groups?.[hit.part] && (pointIn || (!this.def.stab && Math.random() < EMBED_CHANCE))) this.stickIn(hit, vel, axis, power);
+    if (slicing) { /* (not stuck: it's on its way through) */ }
+    else if (kerf && hit.actor.groups?.[kerf.part] && (this.owner?.vrSelf || Math.random() < 0.3)) this.stickIn({ ...hit, part: kerf.part }, vel, axis, power, kerf);
+    else if (blade && !this.def.harmless && !cut && !kerf && hit.actor.groups?.[hit.part] && (pointIn || (!this.def.stab && !this.def.cutter && Math.random() < EMBED_CHANCE))) this.stickIn(hit, vel, axis, power);
     const k = clamp(vel.length() / 12, 0.4, 1);
     const head = hit.part === 'head' || hit.part === 'neck';
     this.ctx.sfx?.(this.def.sound, Math.min(1, k * 1.15), { rate: 0.92 + Math.random() * 0.14 });
@@ -1044,14 +1173,15 @@ export class Melee {
     else this.ctx.sfx?.('punch', 0.55 + 0.35 * k, { rate: 0.7 });           // the meat of it
     this.ctx.sfx?.('impact', 0.3 + 0.3 * k * power, { rate: 0.5 });
     // heavier blows freeze longer; you feel it land (going clean through: a flick, not a stop)
-    this.stop = cut ? 0.04 : 0.06 + this.def.massKg * 0.03 * power;
+    this.stop = this.def.cutter ? 0 : slicing ? 0.015 : cut ? 0.04 : 0.06 + this.def.massKg * 0.03 * power;
     const jolt = (0.1 + 0.1 * k) * power * (head ? 1.25 : 1) * (0.8 + this.def.massKg * 0.2);
-    this.ctx.impact?.(cut ? jolt * 0.6 : jolt, this.owner, hit.actor);
+    // (a cutter: no hit-stop or jolt - the edge carries on into them under your control)
+    if (!this.def.cutter) this.ctx.impact?.(cut || slicing ? jolt * 0.5 : jolt, this.owner, hit.actor);
     // it comes away bloody: a blade always, a blunt one off skin that's already bleeding
     const wet = hit.actor.wounds?.parts[hit.part]?.wet || 0;
     const amt = blade && !this.def.harmless ? 0.45 + 0.35 * k * power : wet * 0.6 * k;
     if (amt > 0.05) this.blood.add(hit.point, cut ? 1 : amt, inkOf(hit.actor));
-    return cut;
+    return cut || slicing;
   }
 
   update(dt) {

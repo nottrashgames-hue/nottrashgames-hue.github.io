@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { dress } from './costumes.js';
-import { tube, headGeo } from './shapes.js';
+import { tube, headGeo, earGeo, browGeo, lidGeo } from './shapes.js';
 import { orient, solveTwoBone } from './ik.js';
 import { STEP } from './world.js';
 import { Traverse } from './traverse.js';
@@ -35,6 +35,28 @@ function mesh(geo, mat, parent, pos = [0, 0, 0], scale = [1, 1, 1]) {
 }
 
 
+
+/**
+ * The skin material reads the face's per-vertex tint (shapes.js headGeo: lips, nostrils, cheeks,
+ * lids). Every other skin mesh has no such attribute: it reads as 0 (defaultAttributeValues), no
+ * change. Marked so the stainable copy (stain.js) does the same.
+ */
+function tintable(m) {
+  m.userData.tint = true;
+  m.defaultAttributeValues = { ...(m.defaultAttributeValues || {}), tint: [0, 0, 0] };
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec3 tint;\nvarying vec3 vTint;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTint = tint;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTint;')
+      .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.rgb *= max(vec3(0.0), 1.0 + vTint);');
+  };
+  m.customProgramCacheKey = () => 'skin-tint';
+  return m;
+}
+const PUPIL = new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 0.1 });
+const LID_UP = lidGeo(true), LID_LO = lidGeo(false);
 
 // ---------- dimensions (meters) ----------
 const THIGH = 0.44, SHIN = 0.43, ANKLE_H = 0.075;
@@ -191,6 +213,10 @@ export class Character {
       this.mat.skin = new THREE.MeshStandardMaterial({ color: 0xd9dde3, roughness: 0.2, metalness: 1, envMap: goldEnv(), envMapIntensity: 1.3 });
     }
 
+    // (the face's tint on the skin; a body of special stuff keeps its own look)
+    if (!look.gold && !look.silver) tintable(this.mat.skin);
+    // a plain human face (no costume over it): lids, pupils
+    this.human = !look.costume && !look.cat && !look.fixed && !look.toon && !look.gold && !look.glowEyes;
     this.buildBody();
     this.legs = [1, -1].map((side, i) => this.buildLeg(side, i * 0.5));
     this.arms = [1, -1].map((side) => this.buildArm(side));
@@ -343,12 +369,16 @@ export class Character {
     this.neck.position.set(0, 0.255, -0.005);
     this.chest.add(this.neck);
     const nk = Math.pow(B, 0.5) * (F ? 0.9 : 1);
+    // (narrowest under the jaw, flaring into the shoulders at the base; a little fuller behind)
     this.neckMesh = mesh(tube([
-      [0.13, 0.043, 0.045, 0.042],
-      [0.07, 0.045, 0.047, 0.046],
-      [0.01, 0.05, 0.05, 0.052],
-      [-0.03, 0.062, 0.056, 0.062],
+      [0.13, 0.042, 0.044, 0.044],
+      [0.09, 0.043, 0.045, 0.047],
+      [0.05, 0.046, 0.047, 0.05],
+      [0.01, 0.052, 0.05, 0.056],
+      [-0.03, 0.066, 0.056, 0.066],
     ].map(([y, a, b, c]) => [y, a * nk, b * nk, c * nk]), { caps: [false, true] }), M.skin, this.neck);
+    // the throat: an Adam's apple on men
+    const adam = !F && !this.look.costume ? blob(M.skin, [0, 0.07, 0.04 * nk], [0.011, 0.016, 0.009], this.neck) : null;
 
     // Head — one sculpted surface
     this.head = new THREE.Group();
@@ -360,18 +390,38 @@ export class Character {
     this.head.add(face);
     this.face = face;
     this.eyes = [];
-    mesh(headGeo(), M.skin, face);
+    mesh(headGeo({ F: this.shape.F }), M.skin, face);
     // small parts only worth drawing up close (see setDetail)
-    this.detail = [];
+    this.detail = adam ? [adam] : [];
     this.tinyFace = [];
     for (const s of [1, -1]) {
       const eye = blob(M.eye, [s * 0.029, 0.01, 0.083], [0.0118, 0.0118, 0.0118], face);
       const iris = blob(M.iris, [s * 0.029, 0.01, 0.0938], [0.0062, 0.0062, 0.002], face);
-      const brow = blob(M.hair, [s * 0.03, 0.027, 0.097], [0.016, 0.0032, 0.005], face, [0.2, 0, s * -0.1]);
-      if (this.look.ears !== false) blob(M.skin, [s * 0.077, -0.002, -0.006], [0.009, 0.025, 0.016], face, [0, s * 0.25, 0]);
+      // an arched brow, thinning out toward the temple
+      const brow = mesh(browGeo(), M.hair, face, [s * 0.03, 0.028, 0.097], [s, 1, 1]);
+      brow.rotation.set(0.2, s * 0.18, s * -0.06);
+      if (this.look.ears !== false) {
+        const ear = mesh(earGeo(), M.skin, face, [s * 0.078, -0.004, -0.008], [s, 1, 1]);
+        ear.rotation.set(0, s * -0.3, s * 0.05);
+      }
+      const lids = [];
+      if (this.human) {
+        // lids over the top and bottom of the eyeball (children of it: hidden, scaled, moved with it)
+        const up = new THREE.Mesh(LID_UP, M.skin), lo = new THREE.Mesh(LID_LO, M.skin);
+        up.rotation.x = -0.12;
+        lo.rotation.x = 0.1;
+        eye.add(up, lo);
+        lids.push(up, lo);
+        // and a pupil in the iris
+        const pupil = new THREE.Mesh(sphereGeo, PUPIL);
+        pupil.position.z = 0.55;
+        pupil.scale.set(0.44, 0.44, 0.6);
+        iris.add(pupil);
+        this.tinyFace.push(up, lo, pupil);
+      }
       this.tinyFace.push(eye, iris, brow);
       this.detail.push(eye, iris, brow);
-      this.eyes.push({ eye, iris, brow, side: s });
+      this.eyes.push({ eye, iris, brow, lids, side: s });
       if (this.look.gold || this.look.glowEyes) {
         // the glow round each eye (drawn at any distance: that's the point)
         const glow = new THREE.Sprite(eyeGlow(this.look.glowEyes === 'yellow' ? 'yellow' : this.look.glowEyes === 'neon' ? false : !this.look.gold));
@@ -582,18 +632,27 @@ export class Character {
     };
     if (wd) { sleeve(false); sleeve(true); } else sleeve(longSl);
 
-    // forearm: bulky near elbow, flat at wrist
+    // forearm: bulky near the elbow, flattening into the wrist the way the hand is (its width
+    // along z, like the palm's)
     const foreRows = W([
-      [0.01, 0.036, 0.032, 0.036],
-      [-0.05, 0.04, 0.036, 0.036],
-      [-0.12, 0.034, 0.03, 0.03],
-      [-0.2, 0.028, 0.022, 0.022],
-      [-FOREARM, 0.025, 0.017, 0.017],
+      [0.01, 0.036, 0.033, 0.036],
+      [-0.05, 0.04, 0.037, 0.037],
+      [-0.12, 0.034, 0.031, 0.031],
+      [-0.2, 0.025, 0.026, 0.025],
+      [-FOREARM, 0.018, 0.024, 0.023],
     ], ka);
     mesh(tube(foreRows), M.skin, fore);
+    // the elbow: a rounded joint the two halves of the arm turn about (no seam when it bends),
+    // the point of it behind
+    blob(M.skin, [0, 0, 0], [0.035 * ka, 0.037 * ka, 0.034 * ka], fore);
+    blob(M.skin, [0, 0.004, -0.021 * ka], [0.019 * ka, 0.024 * ka, 0.015 * ka], fore);
+    // the wrist, carrying the forearm into the hand
+    blob(M.skin, [0, -FOREARM + 0.004, 0], [0.019 * ka, 0.02, 0.024 * ka], fore);
     if (longSl || wd) {
       const m = mesh(tube(W(foreRows.slice(0, 4), 1.14), { caps: [true, false] }), M.top, fore);
-      if (wd) { m.userData.wardrobe = true; this.sleeveSets.long.push(m); }
+      // (the sleeve's elbow)
+      const e = blob(M.top, [0, 0, 0], [0.04 * ka, 0.042 * ka, 0.039 * ka], fore);
+      if (wd) for (const x of [m, e]) { x.userData.wardrobe = true; this.sleeveSets.long.push(x); }
     }
 
     const hand = new THREE.Group();
@@ -653,6 +712,12 @@ export class Character {
       [-SHIN, 0.029, 0.027, 0.03],
     ], kl);
     mesh(tube(shinRows), M.skin, shin);
+    // the knee: a rounded joint the thigh and shin turn about, the kneecap over the front of it
+    blob(M.skin, [0, 0, 0], [0.05 * kl, 0.052 * kl, 0.048 * kl], shin);
+    blob(M.skin, [0, -0.008, 0.03 * kl], [0.027 * kl, 0.032 * kl, 0.018 * kl], shin);
+    // the ankle bones either side, down into the shoe
+    blob(M.skin, [0, -SHIN + 0.008, 0], [0.031 * kl, 0.026, 0.03 * kl], shin);
+    if (longP || wd) tag(blob(M.shorts, [0, 0, 0.003], [0.058 * kl, 0.06 * kl, 0.058 * kl], shin), true);
     // trouser leg: loose, down over the top of the shoe
     if (longP || wd) tag(mesh(tube(shinRows.map(([y, a, b, c], i) => [i === 0 ? 0.04 : i === 5 ? -SHIN + 0.035 : y, Math.max(a * 1.18, 0.045), Math.max(b * 1.2, 0.045), Math.max(c * 1.15, 0.045)]), { caps: [true, false] }), M.shorts, shin), true);
 
@@ -1214,8 +1279,10 @@ export class Character {
     this.hips.rotation.set(lean * 0.45 + 0.04 + cF * 0.6 + kl + fb * 0.55, pelvisYaw + (this.kick ? -this.legs[this.kick.leg].side * 0.25 * Math.sin(Math.PI * clamp(this.kick.t / this.kick.dur, 0, 1)) : 0), roll + turnLean);
     // twist/bend: extra trunk rotation asked for by whatever the arms are doing (punches, swings)
     const tw = this.twist || 0, bend = this.bend || 0;
-    this.spine.rotation.set(lean * 0.3 + 0.012 * breathe + bend * 0.5 - cF * 0.22 - kl * 0.4 + fb * 0.42, -pelvisYaw * 0.5 + tw * 0.45, -roll * 0.5);
-    this.chest.rotation.set(lean * 0.25 - 0.03 - 0.008 * breathe + bend * 0.5 - cF * 0.08 + fb * 0.3, -pelvisYaw * 0.45 + tw * 0.55, -roll * 0.4 - turnLean * 0.4);
+    // (sway: the trunk pushed over - actor.js pushed)
+    const sx = this.swayX || 0, sz = this.swayZ || 0;
+    this.spine.rotation.set(lean * 0.3 + 0.012 * breathe + bend * 0.5 - cF * 0.22 - kl * 0.4 + fb * 0.42 + sx * 0.5, -pelvisYaw * 0.5 + tw * 0.45, -roll * 0.5 + sz * 0.5);
+    this.chest.rotation.set(lean * 0.25 - 0.03 - 0.008 * breathe + bend * 0.5 - cF * 0.08 + fb * 0.3 + sx * 0.5, -pelvisYaw * 0.45 + tw * 0.55, -roll * 0.4 - turnLean * 0.4 + sz * 0.5);
 
     // head looks toward camera direction when it's roughly in front
     const camFacing = ctrl.camYaw + Math.PI;

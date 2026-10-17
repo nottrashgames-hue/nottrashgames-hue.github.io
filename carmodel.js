@@ -625,10 +625,7 @@ export function buildCar(kind, color, env, interior = 0) {
   }
   const wc = S.wheelC;
   add('plastic', place(rboxG(0.44, 0.08, 0.18, 0.03), wc.x, dTop + 0.03, dz + 0.1), I.dash);              // gauge hood
-  for (const dx of [-0.08, 0.08]) {
-    add('plastic', place(new THREE.CylinderGeometry(0.055, 0.055, 0.01, 16).rotateX(Math.PI / 2 - 0.25), wc.x + dx, dTop - 0.045, dz + 0.004), 0xe8e8e0);
-    add('plastic', place(boxG(0.006, 0.045, 0.004), wc.x + dx, dTop - 0.04, dz - 0.004, -0.25, 0, dx > 0 ? -0.8 : 0.6), 0xd83a20);
-  }
+  // (no dials: the digital display sits on top of the hood - dash.js)
   add('plastic', place(boxG(0.36, 0.28, 0.06), 0, dTop - 0.2, dz + 0.03, -0.3), I.dash);                  // centre stack
   add('lamp', place(boxG(0.2, 0.12, 0.01).translate(0, 0.06, -0.034), 0, dTop - 0.2, dz + 0.03, -0.3));  // screen
   for (const s of [1, -1]) add('plastic', place(boxG(0.1, 0.05, 0.01), s * 0.62, dTop - 0.07, dz - 0.004), BLACK); // vents
@@ -736,6 +733,8 @@ export function buildCar(kind, color, env, interior = 0) {
   {
     const parts = [];
     parts.push(prep(new THREE.TorusGeometry(0.18, 0.02, 8, 28), 0x17181a));
+    // (a red stripe at the top of the rim: you can see how far round it's turned)
+    parts.push(prep(boxG(0.03, 0.05, 0.05).translate(0, 0.18, 0), 0xc8202a));
     parts.push(prep(new THREE.CylinderGeometry(0.055, 0.06, 0.05, 14).rotateX(Math.PI / 2).translate(0, 0, -0.015), 0x202124));
     for (const a of [-Math.PI / 6 - 0.2, Math.PI + Math.PI / 6 + 0.2, -Math.PI / 2]) {
       const sp = boxG(0.13, 0.03, 0.015).translate(0.1, 0, -0.005);

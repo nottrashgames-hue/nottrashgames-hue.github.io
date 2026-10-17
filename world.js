@@ -1,35 +1,5 @@
 import * as THREE from 'three';
-
-function grassTexture() {
-  const S = 512, c = document.createElement('canvas');
-  c.width = c.height = S;
-  const g = c.getContext('2d');
-  let seed = 78421;
-  const rand = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
-  g.fillStyle = '#648f48';
-  g.fillRect(0, 0, S, S);
-  // Overdraw wrapped color variation and fine blades so the repeating texture has no grid marks.
-  for (let i = 0; i < 90; i++) {
-    const x = rand() * S, y = rand() * S, r = 12 + rand() * 54;
-    const color = i % 2 ? 'rgba(37,69,27,0.28)' : 'rgba(177,190,91,0.18)';
-    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
-      const gx = x + ox, gy = y + oy;
-      const grad = g.createRadialGradient(gx, gy, 0, gx, gy, r);
-      grad.addColorStop(0, color); grad.addColorStop(1, 'rgba(0,0,0,0)');
-      g.fillStyle = grad; g.fillRect(gx - r, gy - r, r * 2, r * 2);
-    }
-  }
-  for (let i = 0; i < 11000; i++) {
-    const v = rand(), x = rand() * S, y = rand() * S;
-    const w = 1 + rand(), h = 2 + rand() * 4;
-    g.fillStyle = v < 0.5 ? 'rgba(34,67,25,0.44)' : 'rgba(168,193,91,0.38)';
-    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) g.fillRect(x + ox, y + oy, w, h);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
+import { grassGround } from './grass.js';
 
 export const STEP = 0.22; // tallest ledge the feet just walk up onto
 
@@ -371,17 +341,8 @@ export function findSeats(colliders) {
  */
 export function buildBaseplate(scene, renderer) {
   const sun = addSky(scene);
-  const tex = grassTexture();
   const SIZE = 400;
-  tex.repeat.set(SIZE / 16, SIZE / 16);
-  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(SIZE, SIZE),
-    new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 })
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.receiveShadow = true;
-  scene.add(ground);
+  scene.add(grassGround(SIZE, renderer));
 
   return {
     colliders: new Colliders(), sun, seats: [], parking: [],

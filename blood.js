@@ -16,7 +16,10 @@ import { capsuleOf } from './strike.js';
 */
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
-const MAX = 1400;
+const MAX = 700;
+// drops thrown per second, all sprays together, with a burst on top (a flurry of knife / machete
+// cuts would otherwise fill the air with thousands, each one tested against every car and body)
+const SPRAY_RATE = 240, SPRAY_BURST = 150;
 const G = 9.81;
 const rnd = (a, b) => a + Math.random() * (b - a);
 
@@ -101,6 +104,7 @@ export class BloodSystem {
     this.ink = 0;
     scene.add(this.mesh);
     this.p = []; // { pos, vel, r, age }
+    this.bud = SPRAY_BURST; this.budT = performance.now();
     this.cars = null; // set by main: every car, for drops landing on them
     // set by main: the sound player and where the ears are (the camera)
     this.sfx = null;
@@ -173,6 +177,14 @@ export class BloodSystem {
     const ink = this.takeInk();
     if (!settings.blood || !settings.bloodSpray || noInk(ink)) return;
     n = bloodCount(n);
+    const now = performance.now();
+    this.bud = Math.min(SPRAY_BURST, this.bud + (now - this.budT) / 1000 * SPRAY_RATE);
+    this.budT = now;
+    // (running low: fewer, bigger drops - it still reads as a lot of blood)
+    const want = n;
+    n = Math.max(0, Math.min(n, Math.floor(this.bud)));
+    this.bud -= n;
+    if (n < want && n > 0) size *= 1 + 0.5 * (1 - n / want);
     for (let i = 0; i < n; i++) {
       if (this.p.length >= MAX) this.p.shift();
       const d = dir.clone();
@@ -243,11 +255,22 @@ export class BloodSystem {
     for (const w of this.people) w.update(dt, budget);
     for (const w of this.people) w.actor.organs.update(dt);
     this.arteries.update(dt);
-    const P = this.p, cols = this.colliders, cars = this.cars;
+    const P = this.p, cols = this.colliders;
     this.bodyCaps(P);
-    let paint = 10; // (people splashed this frame: a stain paint each)
+    // only the cars near the drops in the air get tested
+    let cars = null;
+    if (this.cars?.length && P.length) {
+      const lo = _lo.set(Infinity, Infinity, Infinity), hi = _hi.set(-Infinity, -Infinity, -Infinity);
+      for (const p of P) { lo.min(p.pos); hi.max(p.pos); }
+      cars = this.cars.filter((c) => {
+        const q = c.p;
+        return !q || (q.x > lo.x - 4 && q.x < hi.x + 4 && q.z > lo.z - 4 && q.z < hi.z + 4 && q.y > lo.y - 4 && q.y < hi.y + 4);
+      });
+      if (!cars.length) cars = null;
+    }
+    let paint = 5; // (people splashed this frame: a stain paint each)
     // full splats this frame (GPU-painted, cheap): only a truly absurd gush falls back to plain drops
-    let splats = 400;
+    let splats = 90;
     let n = 0;
     for (let i = 0; i < P.length; i++) {
       const p = P[i];

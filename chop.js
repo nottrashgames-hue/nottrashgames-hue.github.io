@@ -5,7 +5,7 @@ import { inkOf } from './inks.js';
 import { openGash, updateGash, closeGash } from './gash.js';
 
 /*
-  Chopping (the machete: def.chop). A blade that lands edge first doesn't take a limb off in one
+  Chopping (choppers: def.chop - hatchet, axe...). A blade that lands edge first doesn't take a limb off in one
   go unless the blow is a truly huge one: it bites in - a real kerf, opened into the meshes
   (saw.js groove), set in the plane the edge came down in and carried with the part - and every
   blow that lands back in that kerf drives it deeper. Bone is the hard part in the middle. Once

@@ -79,7 +79,8 @@ export function partNear(A, name, p) {
   if (!P || P.gone) return null;
   const cap = P.cap || capsules(A.rd)[name];
   const at = V(), q = new THREE.Quaternion();
-  if (A.mode === 'ragdoll') { A.rd.pos(name, at); A.rd.quat(name, q); }
+  // (someone else's ragdoll is simulated on their client: here, only its rendered bones are where it is)
+  if (A.mode === 'ragdoll' && !A.remote) { A.rd.pos(name, at); A.rd.quat(name, q); }
   else { const g = A.groups[name]; g.updateWorldMatrix(true, false); g.getWorldPosition(at); g.getWorldQuaternion(q); }
   const a = cap.a.clone().applyQuaternion(q).add(at), b = cap.b.clone().applyQuaternion(q).add(at);
   const ab = b.clone().sub(a), len2 = ab.lengthSq();

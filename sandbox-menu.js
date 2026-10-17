@@ -33,14 +33,15 @@ export class SandboxMenu {
           '<section class="sandbox-card"><h2>Weapons</h2><div class="sandbox-options weapon-options">' +
             '<button data-weapon="pistol">Pistol</button><button data-weapon="rifle">Rifle</button><button data-weapon="shotgun">Shotgun</button>' +
             '<button data-weapon="sniper">Sniper</button><button data-weapon="bat">Bat</button><button data-weapon="machete">Machete</button>' +
-            '<button data-weapon="crowbar">Crowbar</button><button data-weapon="fireaxe">Fire axe</button><button data-weapon="saw">Saw</button>' +
+            '<button data-weapon="crowbar">Crowbar</button><button data-weapon="fireaxe">Fire axe</button>' +
           '</div></section>' +
           ('<section class="sandbox-card object-card sb-play"><h2>Place objects</h2><div class="sandbox-options">' +
             '<button data-object="table">Table</button><button data-object="chair">Chair</button><button data-object="trash">Bin</button>' +
             '<button data-object="hydrant">Hydrant</button><button data-object="mail">Mailbox</button>' +
+            '<button data-object="log">Log</button><button data-object="meat">Meat</button><button data-object="sack">Sack</button><button data-object="plate">Steel plate</button>' +
           '</div><p class="object-note">Available in Invincible mode.</p></section>') +
           '<section class="sandbox-card map-card"><h2>Maps</h2><div class="sandbox-options map-options">' +
-            '<button data-map="baseplate">Baseplate</button><button data-map="room">Room</button>' +
+            '<button data-map="baseplate">Baseplate</button><button data-map="room">Room</button><button data-map="racetrack">Racetrack</button>' +
           '</div></section>' +
         '</div>' +
       '</section>';

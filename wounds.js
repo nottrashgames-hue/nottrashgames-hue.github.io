@@ -1,9 +1,10 @@
 import { settings } from './settings.js';
+import { posePositions } from './skinpose.js';
 import * as THREE from 'three';
 import { StainVol, stainMaterial } from './stain.js';
 import { DRY_T } from './dry.js';
 import { inkOf, inkMat, noInk, rollPrism, inkFilm, isVomit } from './inks.js';
-import { dentMeshes, undent, fallDent, crunch } from './dent.js';
+import { dentMeshes, undent, fallDent, crunch, DENT_CAP } from './dent.js';
 import { freshMatrices } from './slice.js';
 
 /*
@@ -42,6 +43,9 @@ let BEAD_GEO = null;
 const shown = (m) => !m.userData.wardrobe || m.visible;
 
 // how hard a round-cut artery jets out of the wounds
+// a melee weapon's name, for the scanner (melee.js WEAPONS keys)
+const WEAPON_NAMES = { fireaxe: 'Fire axe', longsword: 'Longsword', knife: 'Knife', sledge: 'Sledgehammer' };
+export const weaponName = (w) => WEAPON_NAMES[w.wtype] || (w.wtype ? w.wtype[0].toUpperCase() + w.wtype.slice(1) : 'Blade');
 const ARTERY_JET = { femoral: 1.3, carotid: 1.4, brachial: 0.9, iliac: 0.8, aorta: 0.6, popliteal: 0.8 };
 
 export class Wounds {
@@ -107,6 +111,7 @@ export class Wounds {
         entries.push({ m, sp, cloth: CLOTH.has(m.material) || !!m.material.userData.cloth });
       }
       const vol = new StainVol(lo, hi);
+      vol.u.uHoleSkin.value = h.mat.skin.color; // (what shows in a bullet hole through the clothes)
       vol.bloodless = noInk(inkOf(actor)); // (bruises and cuts still show; never any blood)
       const samples = [];
       for (const e of entries) {
@@ -146,6 +151,8 @@ export class Wounds {
   /** Wipe every wound, stain and drip off the body (respawn). */
   heal() {
     this.traces = [];
+    this.pending = []; this.stabs?.clear(); this.stuck = [];
+    this.ver = (this.ver || 0) + 1;
     for (const d of this.drips) d.bead && this.sys.scene.remove(d.bead);
     this.wounds = [];
     this.drips = [];
@@ -213,13 +220,8 @@ export class Wounds {
       m = new THREE.Mesh(geo);
       m.userData.skinSrc = mesh;
     }
-    const arr = m.geometry.attributes.position.array;
-    const v = V();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      mesh.applyBoneTransform(i, v);
-      arr[i * 3] = v.x; arr[i * 3 + 1] = v.y; arr[i * 3 + 2] = v.z;
-    }
+    // (skinning.js-exact, in bulk: skinpose.js)
+    m.geometry.attributes.position.array.set(posePositions(mesh).pp);
     m.geometry.attributes.position.needsUpdate = true;
     m.geometry.computeBoundingSphere();
     m.geometry.boundingBox = null;
@@ -476,6 +478,7 @@ export class Wounds {
     if (organs) {
       if (w) { w.bleed *= Math.min(organs.bleed, 4); w.clot = 40 + 30 * (organs.bleed - 1); }
       if (organs.lethal) this.actor.organs.die();
+      this.cutArtery(part, w, organs);
     }
     // blood thrown the way the blade was going: a fan off the length of the gash, carried
     // with the stroke and lifted a little off the skin, then a weaker spit back out of it
@@ -483,16 +486,22 @@ export class Wounds {
     const sp = clamp(vel.length() * 0.55, 2.5, 9);
     const ends = w?.slice || [entry, entry];
     const lift = (hit ? hit.normal : out).clone();
-    const nStreak = Math.round(5 + sev * 5);
+    const nStreak = Math.round(2 + sev * 2);
     for (let i = 0; i < nStreak; i++) {
       const at = ends[0].clone().lerp(ends[1], Math.random());
       const d = fling.clone().addScaledVector(lift, rnd(0.1, 0.45)).normalize();
-      this.sys.inked(this.actor).spray(at, d, sp, Math.round(2 + sev * 2), 0.14, rnd(0.7, 1.2) + sev * 0.3);
+      this.sys.inked(this.actor).spray(at, d, sp, Math.round(2 + sev), 0.14, rnd(0.7, 1.2) + sev * 0.3);
     }
-    this.sys.inked(this.actor).spray(entry, fling.clone().add(lift).normalize(), sp * 0.4, Math.round(4 + sev * 6), 0.45, 0.9);
-    this.sys.inked(this.actor).spray(entry, out, 1.4, 4, 0.6, 0.7);
+    this.sys.inked(this.actor).spray(entry, fling.clone().add(lift).normalize(), sp * 0.4, Math.round(3 + sev * 2), 0.45, 0.9);
     this.wetPart(part, 0.35 + sev * 0.15);
     return w;
+  }
+
+  /** A blade that opened an artery: it pumps out of the wound in a stream. */
+  cutArtery(part, w, organs) {
+    if (!w || !this.sys.arteries || !organs.hits) return;
+    const art = organs.hits.map((n) => ARTERY_JET[n.replace(/[LR]$/, '')]).filter(Boolean);
+    if (art.length) this.sys.arteries.wound(this.actor, part.group, w, Math.max(...art));
   }
 
   /**
@@ -516,19 +525,19 @@ export class Wounds {
       this.stamp(name, point, out, along, 'bruise', 0.035 + sev * 0.02, 0.03 + sev * 0.015, 0.6);
       this.paint(hit, along, 'cut', len, 0.006 + sev * 0.002, 1);
       this.paint(hit, V(0, -1, 0), 'splash', 0.04 + sev * 0.03, 0.07 + sev * 0.04, 0.85);
-      w = this.addWound(name, hit, clamp(1 + sev * 0.7, 0.9, 2.2), 0.05, 'cut');
+      w = this.addWound(name, hit, clamp(0.7 + sev * 0.4, 0.6, 1.4), 0.07, 'cut');
       w.clot = 45;
     }
     const entry = hit ? hit.point : point;
     const dir = (vel.lengthSq() > 1e-6 ? vel.clone() : n.clone()).normalize();
     const depth = 0.07 + 0.07 * clamp(sev, 0, 1.5);
-    const organs = this.actor.organs?.shot(entry, dir, entry.clone().addScaledVector(dir, depth));
-    this.trace('stab', name, entry, entry.clone().addScaledVector(dir, depth), organs?.hits || []);
-    if (organs) {
-      if (w) { w.bleed *= Math.min(organs.bleed, 4); w.clot = 50 + 30 * (organs.bleed - 1); }
-      if (organs.lethal) this.actor.organs.die();
-    }
-    this.sys.inked(this.actor).spray(entry, out.clone().addScaledVector(V(0, -1, 0), 0.3).normalize(), 1.6, Math.round(4 + sev * 5), 0.4, 0.9);
+    // what it reached inside is decided by how deep it really goes, not by where it went in: a
+    // blade that stays in is followed down its track as it's driven home (followStab); one that
+    // doesn't stay in gets the blow's own depth, a moment from now (settleStabs)
+    const T = this.trace('stab', name, entry, entry, []);
+    const g = part.group;
+    if (T) (this.pending ||= []).push({ name, T, w, W: this.actor._weapon, dirL: dir.clone().transformDirection(g.matrixWorld.clone().invert()), depth, t: 0 });
+    this.sys.inked(this.actor).spray(entry, out.clone().addScaledVector(V(0, -1, 0), 0.3).normalize(), 1.6, Math.round(3 + sev * 2), 0.4, 0.9);
     this.wetPart(part, 0.3 + sev * 0.15);
     return w;
   }
@@ -554,14 +563,13 @@ export class Wounds {
       if (j - i > 2 || a.vol !== b.vol) continue; // gap: the skin fell away there (edge of the limb), or skin -> cloth
       const mid = ((i + j) / 2) / (N - 1) - 0.5;          // -0.5..0.5 along the cut
       const t = 1 - Math.pow(Math.abs(mid) * 2, 1.6);      // 1 in the middle, 0 at the ends
-      const wd = Math.max(0.0025, (0.004 + sev * 0.004) * (0.25 + t));
-      a.vol.line(a.sp, b.sp, wd, 2, 0.7 + t * 0.5);      // the opening
-      a.vol.line(a.sp, b.sp, wd * 2.4, 0, 0.35 + t * 0.3); // blood welling along its lips
+      const wd = Math.max(0.002, (0.003 + sev * 0.002) * (0.25 + t));
+      a.vol.line(a.sp, b.sp, wd, 2, 0.32 + t * 0.15);    // the opening (a cut in the skin, not a deep gash)
+      a.vol.line(a.sp, b.sp, wd * 2.2, 0, 0.25 + t * 0.2); // blood welling along its lips
     }
     hit.vol.add(hit.sp, 0.02 + sev * 0.01, 0, 0.45);
-    const w = this.addWound(part.name, hit, clamp(0.8 + sev * 0.6, 0.7, 1.9), 0.05, 'cut');
+    const w = this.addWound(part.name, hit, clamp(0.5 + sev * 0.4, 0.4, 1.2), 0.08, 'cut');
     // the length of it weeps too: a couple of smaller wounds out toward the ends
-    for (const k of [1, N - 2]) if (pts[k]) this.addWound(part.name, pts[k], clamp(0.2 + sev * 0.2, 0.15, 0.5), 0.2, 'cut').clot = 25;
     const e0 = good[0][0].point.clone(), e1 = good[good.length - 1][0].point.clone();
     w.slice = [e0, e1];
     return w;
@@ -582,9 +590,113 @@ export class Wounds {
     const g = this.parts[name]?.group;
     if (!g) return;
     g.updateWorldMatrix(true, false);
-    (this.traces ||= []).push({ kind, part: name, a: g.worldToLocal(a.clone()), b: g.worldToLocal(b.clone()), hits: [...hits], exited });
+    const T = { kind, part: name, a: g.worldToLocal(a.clone()), b: g.worldToLocal(b.clone()), hits: [...hits], exited };
+    (this.traces ||= []).push(T);
+    this.ver = (this.ver || 0) + 1;
     if (hits.length) this.actor.logHit?.(hits);
     if (this.traces.length > 40) this.traces.shift();
+    return T;
+  }
+
+  /** The scanner's impact history: tissues reached later on by weapon W (actor.logHit). */
+  logTo(W, hits) {
+    const A = this.actor;
+    if (!W || !hits.length || !A.logHit) return;
+    const w0 = A._weapon, t0 = A._weaponT;
+    A._weapon = W; A._weaponT = performance.now();
+    A.logHit(hits);
+    A._weapon = w0; A._weaponT = t0;
+  }
+
+  /** What a stab that turned out deeper (or a guessed one) reached: its harm, on the wound. */
+  stabHarm(name, R, res) {
+    const O = this.actor.organs;
+    for (const n of res.hits) { R.hit.add(n); R.T.hits.push(n); }
+    if (!res.hits.length) return;
+    this.ver = (this.ver || 0) + 1;
+    this.logTo(R.W, res.hits);
+    const w = R.w;
+    if (w) { w.bleed = Math.max(w.bleed, R.bleed0 * Math.min(res.bleed, 4)); w.clot = Math.max(w.clot || 0, 50 + 30 * (res.bleed - 1)); }
+    if (res.lethal) O.die();
+    this.cutArtery(this.parts[name], w, res);
+  }
+
+  /**
+   * Every weapon stuck in this body right now (melee.js stickIn / throw.js embed - the mesh is
+   * a child of the part), for the scanner: this.stuck = [{ w, S, part, depth }]. One stuck in
+   * point first is followed down its track: as the tip goes deeper than it has been, the track
+   * grows and whatever it reaches on the way is hurt then.
+   */
+  trackStuck() {
+    const A = this.actor, list = [], live = new Set();
+    this.stabs ||= new Map();
+    for (const [name, p] of Object.entries(this.parts)) {
+      const g = p.group;
+      if (!g) continue;
+      for (const c of g.children) {
+        const w = c.userData.melee;
+        if (!w?.def) continue;
+        const S = w.stuckIn?.actor === A && w.stuckIn.g === g ? w.stuckIn : w.embed?.actor === A && w.embed.g === g ? w.embed : null;
+        if (!S || live.has(S)) continue;
+        live.add(S);
+        const part = this.parts[S.part]?.group === g ? S.part : name;
+        const R = S.inL.y > 0.9 ? this.followStab(S, w, part, g) : null;
+        list.push({ w, S, part, depth: R ? R.max : S.depth });
+      }
+    }
+    this.stuck = list;
+    for (const k of this.stabs.keys()) if (!live.has(k)) this.stabs.delete(k);
+  }
+
+  followStab(S, w, name, g) {
+    const m = w.mesh;
+    m.updateMatrixWorld(true);
+    g.updateWorldMatrix(true, false);
+    const tipL = g.worldToLocal(V(0, w.def.seg[1], 0).applyMatrix4(m.matrixWorld));
+    let R = this.stabs.get(S);
+    if (!R) {
+      // where it went in: back up the blade from the tip by as far as it's in
+      const dirL = S.inL.clone().applyQuaternion(m.quaternion).normalize();
+      const entryL = tipL.clone().addScaledVector(dirL, -S.depth);
+      // the stab's own wound record from this same blow: its guess is replaced by the real thing
+      const P = this.pending?.find((q) => q.name === name && !q.taken);
+      let T, W, wd = null;
+      if (P) { P.taken = true; T = P.T; W = P.W; wd = P.w; T.a.copy(entryL); T.b.copy(entryL); }
+      else { T = this.trace('stab', name, g.localToWorld(entryL.clone()), g.localToWorld(entryL.clone()), []); W = null; }
+      if (!T) return null;
+      W ||= { weapon: weaponName(w), kind: 'blade' };
+      R = { T, W, w: wd, bleed0: wd?.bleed || 1, entryL, dirL, max: 0, hit: new Set(T.hits) };
+      this.stabs.set(S, R);
+    }
+    const d = tipL.sub(R.entryL).dot(R.dirL);
+    if (d < R.max + 0.003) return R;
+    const a = g.localToWorld(R.entryL.clone().addScaledVector(R.dirL, R.max));
+    R.max = d;
+    R.T.b.copy(R.entryL).addScaledVector(R.dirL, d);
+    this.ver = (this.ver || 0) + 1;
+    const b = g.localToWorld(R.T.b.clone());
+    const O = this.actor.organs;
+    if (O) this.stabHarm(name, R, O.shot(a, b.clone().sub(a).normalize(), b, R.hit));
+    return R;
+  }
+
+  /** Stabs that didn't stay in: the blow's own depth decides what they reached. */
+  settleStabs(dt) {
+    if (!this.pending?.length) return;
+    for (const P of this.pending) {
+      P.t += dt;
+      if (P.taken || P.t < 0.05) continue;
+      P.taken = true;
+      const g = this.parts[P.name]?.group, O = this.actor.organs;
+      if (!g) continue;
+      g.updateWorldMatrix(true, false);
+      P.T.b.copy(P.T.a).addScaledVector(P.dirL, P.depth);
+      this.ver = (this.ver || 0) + 1;
+      if (!O) continue;
+      const a = g.localToWorld(P.T.a.clone()), b = g.localToWorld(P.T.b.clone());
+      this.stabHarm(P.name, { T: P.T, W: P.W, w: P.w, bleed0: P.w?.bleed || 1, hit: new Set() }, O.shot(a, b.clone().sub(a).normalize(), b));
+    }
+    this.pending = this.pending.filter((P) => !P.taken);
   }
 
   addWound(name, hit, bleed, next, kind) {
@@ -596,11 +708,30 @@ export class Wounds {
     return w;
   }
 
+  /**
+   * A round meeting fabric goes straight through it: a ragged hole torn in the cloth (stain.js
+   * hole - the skin shows through), a little blood soaking in round it, and the surface it
+   * really wounds is the skin underneath. hit: where it met the body, along: the way it's going.
+   */
+  throughCloth(part, hit, along, r) {
+    if (!hit?.vol || !hit.mesh.userData.stain?.cloth) return hit;
+    hit.vol.hole?.(hit.sp, r);
+    this.paint(hit, along, 'splash', r * 2.2, r * 2, 0.5);
+    const skin = this.rayMeshes(part).filter((m) => !(m.userData.skinSrc || m).userData.stain?.cloth);
+    if (!skin.length) return hit;
+    ray.set(_c.copy(hit.point).addScaledVector(along, -0.015), _b.copy(along));
+    ray.far = 0.12;
+    const h = ray.intersectObjects(skin, false)[0];
+    // (no skin right under it - the shirt is the body's surface there: the wound stays on the cloth, drawn as skin in the hole)
+    return h && h.distance < 0.045 ? this.makeHit(h) : hit;
+  }
+
   /** A bullet through part `name`, entering at `point` travelling along `dir`. Returns { entry wound, organs hit }. */
-  gunshot(name, point, dir) {
+  gunshot(name, point, dir, weapon = null) {
     rollPrism(this.actor); // (prism blood: a new colour for a new injury)
     const part = this.parts[name];
     const head = part.kind === 'head';
+    const shotgun = /shotgun/i.test(weapon || '');
     part.dmg += 1.5;
     const d = dir.clone().normalize();
     const back = d.clone().negate();
@@ -609,18 +740,29 @@ export class Wounds {
       this.paint(hit, d, 'splash', size * 2.6, size * 2.2, 0.85);
       return this.addWound(name, hit, bleed, 0.05, kind);
     };
-    const entryHit = this.surface(part, point, back);
+    let entryHit = this.surface(part, point, back);
+    entryHit = this.throughCloth(part, entryHit, d, shotgun ? 0.009 : 0.011);
     const entry = entryHit && entryHit.vol ? addWound(entryHit, head ? 1.4 : 1.1, 0.022, 'entry') : null;
     // exit: cast back from beyond the far side toward the entry
     ray.set(_c.copy(point).addScaledVector(d, 0.45), _b.copy(back));
     ray.far = 0.45;
     const ex = ray.intersectObjects(this.rayMeshes(part), false)[0];
-    let exitAt = point.clone().addScaledVector(d, 0.1), exitW = null;
+    let exitAt = point.clone().addScaledVector(d, 0.1), exitW = null, exitHit = null;
     if (ex) {
-      const hit = this.makeHit(ex);
-      exitAt = hit.point.clone();
-      if (hit.vol) exitW = addWound(hit, head ? 1.3 : 1, 0.034, 'exit');
+      exitHit = this.throughCloth(part, this.makeHit(ex), back, shotgun ? 0.012 : 0.015);
+      exitAt = exitHit.point.clone();
+      if (exitHit.vol) exitW = addWound(exitHit, head ? 1.3 : 1, 0.034, 'exit');
     }
+    // the skin gives: punched in where it went in, pushed out where it came out (the shotgun's
+    // pellets all land together: one big crater and the flesh blown out behind it - see shotDents)
+    const g = part.group;
+    g.updateWorldMatrix(true, false);
+    (this.shotQ ||= []).push({
+      name, shotgun,
+      inL: entryHit ? g.worldToLocal(entryHit.point.clone()) : null,
+      outL: exitHit ? g.worldToLocal(exitHit.point.clone()) : null,
+      dL: d.clone().transformDirection(g.matrixWorld.clone().invert()),
+    });
     // what it tore through inside decides how hard (and how long) the holes bleed
     const organs = this.actor.organs?.shot(entryHit ? entryHit.point : point, d, ex ? exitAt : null) || { bleed: 1, hits: [] };
     // (for the medical scanner: the round's path through the body, in this part's frame)
@@ -645,6 +787,60 @@ export class Wounds {
     return { entry, organs };
   }
 
+  /**
+   * The rounds that landed this frame, pressed into the skin (dent.js). A bullet: a small
+   * dimple where it went in and the skin puckered out where it left. A shotgun's pellets on one
+   * part go in together - one wide, deep crater - and the flesh behind is blown out in a dome.
+   */
+  shotDents() {
+    const Q = this.shotQ;
+    if (!Q?.length) return;
+    this.shotQ = [];
+    const groups = new Map();
+    for (const s of Q) {
+      const key = s.shotgun ? 'sg:' + s.name : s;
+      let G = groups.get(key);
+      if (!G) groups.set(key, (G = { name: s.name, shotgun: s.shotgun, ins: [], outs: [], d: V() }));
+      if (s.inL) G.ins.push(s.inL);
+      if (s.outL) G.outs.push(s.outL);
+      G.d.add(s.dL);
+    }
+    let any = false;
+    for (const G of groups.values()) {
+      const part = this.parts[G.name];
+      if (!part?.group || this.actor.rd?.parts[G.name]?.gone) continue;
+      const g = part.group;
+      g.updateWorldMatrix(true, false);
+      const d = G.d.normalize().transformDirection(g.matrixWorld);
+      const k = G.ins.length + G.outs.length ? Math.max(G.ins.length, G.outs.length) : 1;
+      const meshes = TORSO.includes(G.name) ? [...new Set(TORSO.flatMap((t) => this.parts[t].meshes))] : part.meshes;
+      const cap = DENT_CAP[part.kind] ?? 0.04;
+      // (never wider than the limb itself: pushed out from inside, it'd swell the whole of it)
+      const Rmax = TORSO.includes(G.name) ? 0.075 : (RADIUS[part.kind] || 0.05);
+      const at = (L, n) => {
+        const c = L.reduce((s, p) => s.add(p), V()).divideScalar(L.length);
+        const w = g.localToWorld(c);
+        const h = this.surface(part, w, n);
+        return h ? h.point.clone() : w;
+      };
+      if (G.ins.length) {
+        const o = G.shotgun
+          ? { depth: Math.min(cap * 0.85, 0.014 + 0.0035 * k), R: Math.min(Rmax, 0.03 + 0.005 * k), cap, crumple: 0.7 }
+          : { depth: Math.min(cap * 0.5, 0.007), R: 0.016, cap: cap * 0.5, crumple: 0.5 };
+        if (dentMeshes(meshes, at(G.ins, d.clone().negate()), d, o) > 0) any = true;
+      }
+      if (G.outs.length) {
+        // (pushed out: the impactor from inside the body, its face reaching out past the skin)
+        const o = G.shotgun
+          ? { depth: Math.min(cap * 0.8, 0.012 + 0.003 * k), R: Math.min(Rmax * 0.9, 0.03 + 0.004 * k), cap, crumple: 0.8 }
+          : { depth: 0.005, R: 0.014, cap: cap * 0.4, crumple: 0.6 };
+        if (dentMeshes(meshes, at(G.outs, d), d, o) > 0) any = true;
+      }
+    }
+    // (the posed copies used for raycasts rebuild from the new shape)
+    if (any && this._posed) for (const c of this._posed.values()) c.frame = -1;
+  }
+
   // ---------- per frame ----------
   update(dt, budget) {
     this.frame = (this.frame || 0) + 1;
@@ -667,6 +863,9 @@ export class Wounds {
       if (cdt) this.contacts(cdt, true);
       this.senseFeet(dt);
     }
+    this.shotDents();
+    this.trackStuck();
+    this.settleStabs(dt);
     this.bleed(dt);
     this.runDrips(dt);
     // what a part or shoe carries dries out too: it stops shedding drops and printing

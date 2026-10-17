@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { sliceGeometry, unskinTear } from './slice.js';
+import { sliceGeometry, unskinTear, pathCurve } from './slice.js';
+import { posePositions } from './skinpose.js';
 
 /*
   A cut that hasn't gone through (chop.js): a real opening in the body's meshes. Every mesh of
@@ -17,7 +18,7 @@ import { sliceGeometry, unskinTear } from './slice.js';
 */
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
-const WALL = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0, side: THREE.DoubleSide,
+export const WALL = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0, side: THREE.DoubleSide,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
 const C_FAT = new THREE.Color(0xd8b088), C_MEAT = new THREE.Color(0xa01e24), C_DEEP = new THREE.Color(0x4a0508);
 const OPEN = 0.32;
@@ -50,9 +51,7 @@ function skinnedOf(A) {
 /** A skinned mesh's geometry with its current pose alongside, as '_posed' (mesh-local). */
 function posed(m) {
   const geo = m.geometry.clone();
-  const P = geo.attributes.position, n = P.count, pp = new Float32Array(n * 3), a = V();
-  for (let i = 0; i < n; i++) { a.fromBufferAttribute(P, i); m.applyBoneTransform(i, a); a.toArray(pp, i * 3); }
-  geo.setAttribute('_posed', new THREE.BufferAttribute(pp, 3));
+  geo.setAttribute('_posed', new THREE.BufferAttribute(posePositions(m).pp, 3));
   return geo;
 }
 
@@ -94,6 +93,9 @@ function merge(a, b) {
 
 /** Wall profile: how far each side stands off the plane at depth d of a cut D deep (gap/2 at d=0). */
 const prof = (d, D, half) => (d >= D ? 0 : half * Math.pow(1 - Math.max(0, d) / D, 1.4));
+/** A blade's kerf (S.kerf): the same width all the way down, closing only right at the bottom. */
+const kprof = (d, D, half) => (d >= D ? 0 : half * Math.min(1, (D - d) / Math.min(0.012, D * 0.3)));
+const profOf = (S) => (S.kerf ? kprof : prof);
 
 /**
  * Open a gash for kerf S (chop.js: pL/nL/inL in the part's frame, r). Called once, on the first bite;
@@ -113,6 +115,10 @@ export function openGash(S) {
   g.updateWorldMatrix(true, true);
   const items = [];
   const gInv = new THREE.Matrix4().copy(g.matrixWorld).invert();
+  // (S.path: the blade's way through so far, in the part's frame - the opening bends along it,
+  // one smooth cut however the blade's turned, the same surface the cut through will follow)
+  const curveL = pathCurve(new THREE.Plane().setFromNormalAndCoplanarPoint(S.nL, S.pL), S.path);
+  const own = { added: [], hidden: [], swaps: [] };
   for (const m of S.torso ? skinnedOf(A) : meshesOf(A, g)) {
     const skin = m.isSkinnedMesh;
     if (skin) m.skeleton.update?.();
@@ -126,22 +132,28 @@ export function openGash(S) {
     const inD = S.inL.clone().applyMatrix3(lin);
     inD.addScaledVector(n, -inD.dot(n)).normalize();
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, P);
+    // (the bend, in this mesh's units: how far off its plane the cut runs at a mesh-space point)
+    const relG = new THREE.Matrix4().multiplyMatrices(gInv, m.matrixWorld);
+    const _c = V();
+    const curve = curveL ? (p) => curveL(_c.copy(p).applyMatrix4(relG)) / sc : null;
+    const off = (p) => plane.distanceToPoint(p) - (curve ? curve(p) : 0);
+    const tear = curve ? { plane, n, curve, noise: () => 0, off: curve, band: 0 } : null;
     const geo = m.geometry;
     if (Array.isArray(m.material)) continue;
     // (no triangle across the plane: this mesh isn't in the way of the cut)
     if (!skin) {
       const box = geo.boundingSphere || (geo.computeBoundingSphere(), geo.boundingSphere);
-      if (Math.abs(plane.distanceToPoint(box.center)) > box.radius) continue;
+      if (Math.abs(plane.distanceToPoint(box.center)) > box.radius + (curveL ? 0.14 / sc : 0)) continue;
     }
     let r;
-    try { r = sliceGeometry(skin ? posed(m) : geo, plane, skin ? '_posed' : 'position'); } catch (e) { continue; }
+    try { r = sliceGeometry(skin ? posed(m) : geo, plane, skin ? '_posed' : 'position', tear); } catch (e) { continue; }
     if (!r.pos || !r.neg || !r.loops.length) continue;
     const { g: cg, side } = merge(r.pos, r.neg);
     let where = cg.attributes.position.array, nb = null;
     if (skin) {
       // the new vertices along the cut: bind positions that skin exactly onto where they were cut
       const PP = cg.attributes._posed, cnt = PP.count, near = new Float32Array(cnt), w = V();
-      for (let i = 0; i < cnt; i++) if (Math.abs(plane.distanceToPoint(w.fromBufferAttribute(PP, i))) < 1e-5) near[i] = 1;
+      for (let i = 0; i < cnt; i++) if (Math.abs(off(w.fromBufferAttribute(PP, i))) < 1e-5) near[i] = 1;
       cg.setAttribute('_tear', new THREE.BufferAttribute(near, 1));
       unskinTear(m, cg);
       where = Float32Array.from(PP.array);
@@ -150,7 +162,7 @@ export function openGash(S) {
       const lim = 0.06 / sc;
       for (let i = 0; i < cnt; i++) {
         w.fromBufferAttribute(PP, i);
-        if (Math.abs(plane.distanceToPoint(w)) > lim) continue;
+        if (Math.abs(off(w)) > lim) continue;
         bindDir(m, cg, i, n, w).toArray(nb, i * 3);
       }
       cg.deleteAttribute('_posed'); cg.deleteAttribute('_tear');
@@ -165,9 +177,9 @@ export function openGash(S) {
     copy.userData = { ...m.userData, cut: false, gashOf: m };
     m.parent.add(copy);
     if (skin) { copy.frustumCulled = false; copy.bind(m.skeleton, m.bindMatrix); }
-    rec.added.push(copy);
+    rec.added.push(copy); own.added.push(copy);
     // the original out of sight (and out of every later cut: slice.js skips .cut)
-    rec.hidden.push([m, m.layers.mask]);
+    rec.hidden.push([m, m.layers.mask]); own.hidden.push([m, m.layers.mask]);
     m.layers.mask = 0; m.userData.cut = true;
     // (wounds / stains paint the copy now)
     const W = A.wounds?.parts;
@@ -175,43 +187,69 @@ export function openGash(S) {
     if (A.wounds?.skinned) lists.push(A.wounds.skinned);
     for (const L of lists) {
       const i = L?.indexOf(m) ?? -1;
-      if (i >= 0) { L[i] = copy; rec.swaps.push([L, m, copy]); }
+      if (i >= 0) { L[i] = copy; rec.swaps.push([L, m, copy]); own.swaps.push([L, m, copy]); }
     }
     if (A.wounds?._posed) for (const c of A.wounds._posed.values()) c.frame = -1;
     // (walls hang off the part: the mesh's frame -> the part's, as it is now)
-    const relG = new THREE.Matrix4().multiplyMatrices(gInv, m.matrixWorld);
-    items.push({ copy, side, base: Float32Array.from(cg.attributes.position.array), where, nb, P, n, inD, ey: V().crossVectors(n, inD), sc, loops: r.loops, relG });
+    // (cv: each vertex's bend off the plane, worked out once - it doesn't change as it deepens)
+    let cv = null;
+    if (curve) { const w = V(); cv = new Float32Array(cg.attributes.position.count); for (let i = 0; i < cv.length; i++) cv[i] = curve(w.set(where[i * 3], where[i * 3 + 1], where[i * 3 + 2])); }
+    items.push({ copy, side, base: Float32Array.from(cg.attributes.position.array), where, nb, P, n, inD, ey: V().crossVectors(n, inD), sc, loops: r.loops, relG, curve, cv });
   }
   if (!items.length) return false;
-  S.gash = rec.by[S.part] = { S, items, walls: [], g };
+  S.gash = rec.by[S.part] = { S, items, walls: [], g, own };
   return true;
 }
 
 /** Taper across the torso: 1 in the middle of the blow, 0 at LAT to either side. */
 const across = (y, Lw) => (Lw ? Math.max(0, 1 - (y / Lw) ** 2) : 1);
 
+/**
+ * The vertices of item `it` that a cut D deep with a flare of `band` can reach, with each one's
+ * depth (d), distance off the cut (dist) and place across it (y) - all fixed, they're measured
+ * on where the vertex was built. Kept with room to spare, and only redone when the cut outgrows it.
+ */
+function candidates(it, D, band) {
+  if (it.cand && D <= it.cD && band <= it.cB) return it.cand;
+  const cD = Math.max(D * 1.6, D + 0.03), cB = Math.max(band * 1.6, band + 0.01);
+  const w = it.where, { P, n, inD, ey, sc, cv } = it, cnt = w.length / 3;
+  const idx = [], ds = [], dists = [], ys = [];
+  for (let i = 0; i < cnt; i++) {
+    _p.set(w[i * 3], w[i * 3 + 1], w[i * 3 + 2]);
+    _q.subVectors(_p, P);
+    const dist = Math.abs(_q.dot(n) - (cv ? cv[i] : 0)) * sc, d = _q.dot(inD) * sc;
+    if (d < cD && dist < cB) { idx.push(i); ds.push(d); dists.push(dist); ys.push(_q.dot(ey) * sc); }
+  }
+  it.cand = Int32Array.from(idx); it.cd = Float64Array.from(ds); it.cdist = Float64Array.from(dists); it.cy = Float64Array.from(ys);
+  it.cD = cD; it.cB = cB;
+  return it.cand;
+}
+
 /** The opening as deep as the kerf now is (S.k of the way through). */
 export function updateGash(S) {
   const G = S.gash;
   if (!G || G.frozen) return;
   const D = Math.max(0.004, S.k * S.r * 2);           // part units (metres on a body of scale 1)
-  const half = D * OPEN * 0.5 + 0.0015;
-  const band = half * 1.2;                             // the skin either side flares out a little too
+  // (S.kerf: just the blade's own width - the mesh cut where the edge went, not pulled open)
+  const half = S.kerf ? S.kerf * 0.5 : D * (S.open ?? OPEN) * 0.5 + 0.0015;
+  const band = S.kerf ? half * 2 : half * 1.2;         // the skin either side flares out a little too
+  const pf = profOf(S);
   const Lw = S.torso ? LAT(D) : 0;
   for (const it of G.items) {
-    const pos = it.copy.geometry.attributes.position, a = pos.array, b = it.base, w = it.where;
-    const { P, n, inD, ey, sc, side, nb } = it;
-    for (let i = 0; i < pos.count; i++) {
-      _p.set(w[i * 3], w[i * 3 + 1], w[i * 3 + 2]);
-      _q.subVectors(_p, P);
-      const dist = Math.abs(_q.dot(n)) * sc, d = _q.dot(inD) * sc;
+    const pos = it.copy.geometry.attributes.position, a = pos.array, b = it.base;
+    const { n, side, nb } = it;
+    // only the vertices near enough the cut to ever move (worked out once, with room to grow -
+    // and again if the cut outgrows it): everything else stays exactly where it was built
+    const C = candidates(it, D, band);
+    for (let q = 0; q < C.length; q++) {
+      const i = C[q], d = it.cd[q], dist = it.cdist[q];
       let o = 0;
       if (d < D && dist < band) {
-        const t = across(_q.dot(ey) * sc, Lw);
-        if (t > 0) o = prof(d, D, half) * Math.sqrt(t) * (1 - dist / band * 0.6) * (0.85 + 0.3 * hash(i));
+        const t = across(it.cy[q], Lw);
+        if (t > 0) o = pf(d, D, half) * Math.sqrt(t) * (S.kerf ? 1 - dist / band : (1 - dist / band * 0.6) * (0.85 + 0.3 * hash(i)));
       }
-      const k = side[i] * o / sc;
-      if (nb) a.set([b[i * 3] + nb[i * 3] * k, b[i * 3 + 1] + nb[i * 3 + 1] * k, b[i * 3 + 2] + nb[i * 3 + 2] * k], i * 3);
+      const k = side[i] * o / it.sc;
+      if (nb) { a[i * 3] = b[i * 3] + nb[i * 3] * k; a[i * 3 + 1] = b[i * 3 + 1] + nb[i * 3 + 1] * k; a[i * 3 + 2] = b[i * 3 + 2] + nb[i * 3 + 2] * k; }
       else { a[i * 3] = b[i * 3] + n.x * k; a[i * 3 + 1] = b[i * 3 + 1] + n.y * k; a[i * 3 + 2] = b[i * 3 + 2] + n.z * k; }
     }
     pos.needsUpdate = true;
@@ -239,6 +277,13 @@ function walls(G, D, half, Lw) {
     if (near > 0.06) continue;
     if (Math.abs(ar) > bestA) { bestA = Math.abs(ar); best = { it, pts }; }
   }
+  // (no outline near the cut's start - a blow that met it from an odd angle: the part's own
+  // round cross-section stands in, so the opening is never left hollow, see-through)
+  if (!best && G.items.length) {
+    const r = Math.max(0.03, G.S.r || 0.05), pts = [];
+    for (let i = 0; i < 20; i++) { const t = (i / 20) * Math.PI * 2; pts.push([r + r * Math.cos(t + Math.PI), r * Math.sin(t + Math.PI)]); }
+    best = { it: G.items[0], pts };
+  }
   if (!best) return;
   // clip it to the cut so far (d < D), and on the torso to the blow's width (|y| < Lw)
   const clip = (src, f) => {
@@ -264,8 +309,10 @@ function walls(G, D, half, Lw) {
   for (const s of [1, -1]) {
     const pos = [], col = [];
     const put = ([x, y], c) => {
-      const off = s * prof(x, D, half) * Math.sqrt(across(y, Lw)) * 0.97 / it.sc;
-      _p.copy(it.P).addScaledVector(it.inD, x / it.sc).addScaledVector(it.ey, y / it.sc).addScaledVector(it.n, off).applyMatrix4(it.relG);
+      const off = s * profOf(G.S)(x, D, half) * Math.sqrt(across(y, Lw)) * 0.97 / it.sc;
+      _p.copy(it.P).addScaledVector(it.inD, x / it.sc).addScaledVector(it.ey, y / it.sc);
+      if (it.curve) _p.addScaledVector(it.n, it.curve(_p));
+      _p.addScaledVector(it.n, off).applyMatrix4(it.relG);
       pos.push(_p.x, _p.y, _p.z); col.push(c.r, c.g, c.b);
     };
     for (let r = 0; r < 2; r++) for (let i = 0; i < N; i++) {
@@ -301,6 +348,28 @@ export function closeGash(S) {
   G.frozen = true;
   const rec = S.A._gash;
   if (rec?.by[S.part] === G) delete rec.by[S.part];
+}
+
+/**
+ * Undo one opening completely - its copies gone, the meshes it was cut from back - so it can be
+ * opened again along the blade's path as it now is (the blade turned in the cut: one smooth
+ * bent opening, not a new slit at every turn).
+ */
+export function dropGash(S) {
+  const G = S.gash, rec = S.A._gash;
+  if (!G || !rec || !G.own) return false;
+  for (const w of G.walls) { w.removeFromParent(); w.geometry.dispose(); }
+  G.walls = [];
+  const drop = (list, items) => { for (const x of items) { const i = list.indexOf(x); if (i >= 0) list.splice(i, 1); } };
+  for (const [arr, was, now] of [...G.own.swaps].reverse()) { const i = arr.indexOf(now); if (i >= 0) arr[i] = was; }
+  for (const [m, mask] of G.own.hidden) { m.layers.mask = mask; m.userData.cut = false; }
+  for (const o of G.own.added) { o.removeFromParent(); o.geometry.dispose(); }
+  drop(rec.swaps, G.own.swaps); drop(rec.hidden, G.own.hidden); drop(rec.added, G.own.added);
+  if (S.A.wounds?._posed) for (const c of S.A.wounds._posed.values()) c.frame = -1;
+  if (rec.by[S.part] === G) delete rec.by[S.part];
+  G.frozen = true;
+  S.gash = undefined;
+  return true;
 }
 
 /** A new life for the body (a respawn, a reset): every gash gone, the original meshes back. */

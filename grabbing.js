@@ -30,8 +30,16 @@ const V_STR = 3.2;
 const REACH = 1.8;      // m, flat from our feet, to what we can take hold of
 const REACH_IN = 0.22;  // s for a hand to get there
 const LET_GO = 1.75;    // m from the shoulder: stretched further than this (for a moment), the grip is lost
-const F_HAND = 1150;    // N one hand can pull with (enough, two-handed, to haul a grown man clean off the floor)
-const F_CHUNK = 320;    // N on a loose piece
+const F_HAND = 1900;    // N one hand can pull with (enough, two-handed, to haul a grown man clean off the floor)
+const F_CHUNK = 520;    // N on a loose piece
+// Bonelab-style: what's held is locked to the hands - it goes where they go and turns as you turn,
+// with no swing or lag. (wn: how stiff, rad/s; the rotation hold is a velocity servo, capped)
+const HOLD_WN = 22;     // the hold point's own easing (only takes the jitter out)
+const PART_WN = 15;     // a person's held part, toward the hold point
+const CHUNK_WN = 20;    // a loose piece
+const ROT_WN = 18;      // the held part / piece keeps the turn it had relative to you when grabbed
+const ROT_MAX = 14;     // rad/s
+const ROT_LOCK = { collar: 1, arm: 1, carry: 1, drag: 1 }; // (a grip is a clamp, never a ball joint: what's held keeps its turn in the hand)
 const RIP_TIME = 1.15;  // s of straining before the torso tears
 
 // where the hands want to hold it, in the body frame (x = left, y up, z forward) from the shoulders
@@ -50,7 +58,7 @@ const LIMB = /^(fore|upper|shin|thigh|foot)([LR])$/;
 const TORSO = { chest: 1, spine: 1, pelvis: 1 };
 
 const _at = V(), _q = Q(), _v = V(), _w = V(), _e = V(), _f = V(), _m = new THREE.Matrix4(), _s = V();
-const _O = V(), _yq = Q(), _iq = Q();
+const _O = V(), _yq = Q(), _iq = Q(), _raw = V(), _acc = V();
 
 /** A part's frame in the world: the physics body when it's ragdolled here, else the animated bone. */
 function partPose(A, name, at, q) {
@@ -134,7 +142,8 @@ export class Grabber {
     }
     for (const c of peopleOnly ? [] : this.ctx.chunks?.() || []) {
       if (!c.body || c.held) continue;
-      consider(tv(c.body.translation(), _w), 0.1, () => ({ chunk: c }));
+      // (a construction piece: its nearest point - a board's end counts, not only its middle)
+      consider(c.near ? c.near(_O, _w) : tv(c.body.translation(), _w), 0.1, () => ({ chunk: c }));
     }
     return best;
   }
@@ -191,6 +200,14 @@ export class Grabber {
       }
     }
     if (!grips.length) return false;
+    // (each grip's hold on the thing's turn, relative to our facing)
+    _iq.copy(_yq).invert();
+    for (const g of grips) {
+      if (g.chunk) { const r = g.chunk.body.rotation(); _q.set(r.x, r.y, r.z, r.w); }
+      else partPose(g.A, g.name, _at, _q);
+      g.qRel = _iq.clone().multiply(_q);
+      g.Yq = _yq.clone();
+    }
     this.grips = grips;
     this.bend = h.bend || 0; this.dip = h.dip || 0;
     for (const g of grips) if (g.chunk) g.chunk.held = true;
@@ -382,7 +399,11 @@ export class Grabber {
       // cut off while held: the hand keeps the piece that came away
       if (g.A && (!this.ctx.actors.includes(g.A) || g.A.rd.parts[g.name]?.gone)) {
         const c = this.pieceOf(g);
-        if (c) { Object.assign(g, this.chunkGrip(g.i, c, g.W, 'carry'), { A: null, name: null, t: Math.max(g.t, REACH_IN) }); c.held = true; }
+        if (c) {
+          Object.assign(g, this.chunkGrip(g.i, c, g.W, 'carry'), { A: null, name: null, t: Math.max(g.t, REACH_IN) }); c.held = true;
+          const r = c.body.rotation();
+          g.qRel = _yq.clone().invert().multiply(_q.set(r.x, r.y, r.z, r.w));
+        }
         else { this.drop(g); continue; }
       }
       if (g.chunk && !this.ctx.chunks?.().includes(g.chunk)) { this.drop(g); continue; }
@@ -394,16 +415,23 @@ export class Grabber {
       const lim = vamp(me) ? 4 : LET_GO;
       g.far = g.W.distanceTo(_s) > lim ? g.far + dt : 0;
       if (g.far > 0.3) { this.drop(g); continue; }
-      g.T.copy(HOLD[g.mode](h.arms[g.i].side)).applyQuaternion(_yq).add(_O);
-      if (this.pull) g.T.add(this.pull);
+      const raw = _raw.copy(HOLD[g.mode](h.arms[g.i].side)).applyQuaternion(_yq).add(_O);
+      if (this.pull) raw.add(this.pull);
       g.ripOffset ||= V();
       g.ripOffset.set(0, 0, 0);
       if (this.rip?.A === A) {
         const amount = smooth(this.rip.t / RIP_TIME) * 0.34;
         g.ripOffset.set(1, 0, 0).applyQuaternion(_yq).multiplyScalar(h.arms[g.i].side * amount);
-        g.T.add(g.ripOffset);
+        raw.add(g.ripOffset);
       }
-      g.vT.copy(h.vel);
+      // where the hands hold it, eased: the walk's bob, a flick of the mouse, a hitch in the
+      // frame rate all smoothed out of it, so what's held follows steadily instead of jerking
+      if (!g.Ts) { g.Ts = raw.clone(); g.Tv = h.vel.clone(); }
+      const wn = HOLD_WN, a = _acc.subVectors(raw, g.Ts).multiplyScalar(wn * wn).addScaledVector(g.Tv, -2 * wn);
+      g.Tv.addScaledVector(a, Math.min(dt, 0.05)).clampLength(0, 20);
+      g.Ts.addScaledVector(g.Tv, Math.min(dt, 0.05));
+      g.T.copy(g.Ts); g.vT.copy(g.Tv);
+      (g.Yq ||= Q()).copy(_yq);
       // someone on their feet, hauled on: they're pulled off balance (and stagger along)
       if (A && !A.remote && A.mode === 'anim' && g.t > REACH_IN && g.T.distanceTo(g.W) > 0.16) {
         A.goRagdoll('stumble', { balance: 0.6, decay: 0.12 });
@@ -440,10 +468,24 @@ export class Grabber {
 
   /** Each physics substep: pull what's held toward where the hands want it. */
   preStep(H) {
+    // someone held hangs off your hands: their limbs settle rather than jitter and flail
+    const k = Math.exp(-H * 9);
+    const calm = new Set();
+    for (const g of this.grips) if (g.t >= REACH_IN * 0.7 && g.A && g.A.mode === 'ragdoll' && !g.A.remote) calm.add(g.A);
+    for (const A of calm) for (const P of A.rd.list) {
+      if (P.gone) continue;
+      const av = P.body.angvel();
+      P.body.setAngvel({ x: av.x * k, y: av.y * k, z: av.z * k }, true);
+    }
     for (const g of this.grips) {
       if (g.t < REACH_IN * 0.7) continue;
-      if (g.chunk) this.pullChunk(g, H);
-      else if (g.A.mode === 'ragdoll' && !g.A.remote) this.pullPart(g, H);
+      // (the hold's target moves on through the frame's substeps, not in a step each frame)
+      g.T.addScaledVector(g.vT, H);
+      if (g.chunk) { this.pullChunk(g, H); holdTurn(g.chunk.body, g, H, 1); }
+      else if (g.A.mode === 'ragdoll' && !g.A.remote) {
+        this.pullPart(g, H);
+        if (ROT_LOCK[g.mode] && !this.rip) holdTurn(g.A.rd.parts[g.name]?.body, g, H, g.str || 1);
+      }
     }
   }
   pullChunk(g, H) {
@@ -453,13 +495,11 @@ export class Grabber {
     const rr = _e.subVectors(W, _v);
     const vel = _f.set(av.x, av.y, av.z).cross(rr).add(_v.set(lv.x, lv.y, lv.z));
     const M = b.mass() || 2;
-    const wn = 13;
+    const wn = CHUNK_WN;
     const F = _e.subVectors(g.T, W).multiplyScalar(wn * wn).addScaledVector(_v.subVectors(g.vT, vel), 2 * wn).multiplyScalar(M);
     F.y += M * 9.81;
     F.clampLength(0, F_CHUNK);
     b.applyImpulseAtPoint(F.multiplyScalar(H), W, true);
-    const k = Math.exp(-H * 5);
-    b.setAngvel({ x: av.x * k, y: av.y * k, z: av.z * k }, true);
     this.load = Math.max(this.load, M * 30);
   }
   pullPart(g, H) {
@@ -554,6 +594,26 @@ export class Grabber {
 }
 
 /**
+ * Keep body b turned the way it was relative to the holder when it was grabbed (g.qRel, under
+ * the holder's facing g.Yq): its spin is servoed toward the turn that closes the gap - a stiff
+ * hold, not a hinge it dangles from.
+ */
+const _qw = Q(), _qe = Q(), _ax = V();
+function holdTurn(b, g, H, str = 1) {
+  if (!b || !g.qRel || !g.Yq) return;
+  const r = b.rotation();
+  _qw.multiplyQuaternions(g.Yq, g.qRel);
+  _qe.copy(_qw).multiply(_q.set(r.x, r.y, r.z, r.w).invert());
+  if (_qe.w < 0) { _qe.x = -_qe.x; _qe.y = -_qe.y; _qe.z = -_qe.z; _qe.w = -_qe.w; }
+  const sn = Math.hypot(_qe.x, _qe.y, _qe.z);
+  const angle = 2 * Math.atan2(sn, _qe.w);
+  if (sn > 1e-6) _ax.set(_qe.x / sn, _qe.y / sn, _qe.z / sn).multiplyScalar(Math.min(angle * ROT_WN * Math.sqrt(str), ROT_MAX));
+  else _ax.set(0, 0, 0);
+  const av = b.angvel(), k = 1 - Math.exp(-H * 40);
+  b.setAngvel({ x: av.x + (_ax.x - av.x) * k, y: av.y + (_ax.y - av.y) * k, z: av.z + (_ax.z - av.z) * k }, true);
+}
+
+/**
  * One hand's pull on part g.name of g.A (ragdolled here), toward g.T moving at g.vT, split
  * `share` ways with the other hands on the same person. Returns the force (N).
  */
@@ -567,7 +627,7 @@ export function pullPart(g, H, share = 1) {
   const M = (rd.mass || 70) * 0.7 / share;
   const str = g.str || 1;
   // (a stiff, well-damped hold: what's in your hands goes where they go, with no wobble)
-  const wn = 10.5 * Math.sqrt(str);
+  const wn = PART_WN * Math.sqrt(str);
   const F = _e.subVectors(g.T, W).multiplyScalar(wn * wn).addScaledVector(_v.subVectors(g.vT, vel), 2 * 1.05 * wn).multiplyScalar(M);
   // the hands carry the body's weight too (shared out between them), not just the part's: lifted,
   // they come up off the ground instead of hanging off a stretched arm
@@ -576,7 +636,7 @@ export function pullPart(g, H, share = 1) {
   const mag = F.length();
   if (mag < 1e-6) return 0;
   // the part held takes what it can; the rest is passed on up the limb to the hips
-  const own = Math.min(mag, P.mass * 160 * Math.sqrt(str));
+  const own = Math.min(mag, P.mass * 300 * Math.sqrt(str));
   b.applyImpulseAtPoint(_v.copy(F).multiplyScalar((own / mag) * H), W, true);
   const rest = mag - own;
   if (rest <= 0) return mag;

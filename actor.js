@@ -147,6 +147,8 @@ export class Actor {
     if (this.remote) return;
     // (admin.js: no ragdoll - nothing knocks you off your feet, unless you're dead)
     if (this.noRagdoll && !this.brain.dead) return;
+    // (just respawned: only a real hit lands, not a nudge)
+    if (kind === 'stumble' && performance.now() < (this.settleUntil || 0) && !this.brain.dead) return;
     // sitting in a car: the car hands the body over with its own velocity
     if (this.seat) { this.seat.car.sys.release(this, kind); return; }
     // only someone actually on their feet can stagger and try to keep their balance: seated,
@@ -263,11 +265,11 @@ export class Actor {
     this._weapon = { weapon: weapon || 'Gunshot', kind: 'gun' }; this._weaponT = performance.now();
     if (this.remote) {
       // the wound shows here; the body's owner takes the hit for real
-      this.onRemoteHit?.('shot', name, point, dir);
-      this.wounds?.gunshot(name, point, dir);
+      this.onRemoteHit?.('shot', name, point, dir, weapon);
+      this.wounds?.gunshot(name, point, dir, weapon);
       return;
     }
-    const res = this.wounds?.gunshot(name, point, dir);
+    const res = this.wounds?.gunshot(name, point, dir, weapon);
     const w = res?.entry, O = res?.organs || { hits: [] };
     const kind = name.replace(/[LR]$/, '');
     const b = this.brain;
@@ -384,7 +386,9 @@ export class Actor {
       : head ? { balance: heavy ? 0.25 : 0.55 - sev * 0.3, decay: heavy ? 1 : 0.55, daze: true }
       : leg ? { balance: heavy ? 0.3 : 0.65, decay: heavy ? 0.9 : 0.45 }
       : { balance: heavy ? 0.45 : 0.74 - sev * 0.25, decay: heavy ? 0.6 : 0.32 };
-    if (this.mode !== 'ragdoll') {
+    // (a knife or a pencil going in: no knock back - they only go down if it drops them)
+    if (w.noPush && !floored) { /* stays on their feet */ }
+    else if (this.mode !== 'ragdoll') {
       if (this.mode === 'blend') this.hero.action = null;
       this.goRagdoll(opts ? 'stumble' : 'collapse', opts || undefined);
     } else if (b.state === 'balance' && opts) {
@@ -394,9 +398,11 @@ export class Actor {
     if (wound && !dead) b.wounded(name, wound.local, wound.nLocal);
     // whoever did it is who we watch now
     if (!dead) b.hitBy(by, by ? null : point.clone().addScaledVector(vel.clone().normalize(), -3));
-    const imp = vel.clone().multiplyScalar(w.mass).clampLength(0, w.maxImp || 90);
-    imp.addScaledVector(n, imp.length() * 0.15);
-    this.pending = { imp, part: name, point: point.clone() };
+    if (!w.noPush) {
+      const imp = vel.clone().multiplyScalar(w.mass).clampLength(0, w.maxImp || 90);
+      imp.addScaledVector(n, imp.length() * 0.15);
+      this.pending = { imp, part: name, point: point.clone() };
+    }
     this.onStruck?.(by, heavy, name, sev);
     if (!dead) this.onPain?.(name, 'pain', sev);
   }
@@ -463,8 +469,17 @@ export class Actor {
   /** Back on your feet at pos, healed, whatever state the body was in. */
   respawn(pos, yaw) {
     if (this.seat) { const s = this.seat; s.occ = null; this.seat = null; this.postSnap = null; if (s.driver) s.car.sys.abandon(s.car); }
-    if (this.mode === 'ragdoll') { this.brain.hands.reset(); this.rd.disable(); }
+    // (whatever mode it was in - ragdoll, mid-blend, braced - the physics body goes fully off)
+    this.brain.hands?.reset?.();
+    if (this.mode === 'ragdoll' || this.rd.active) this.rd.disable();
     this.mode = 'anim';
+    this.brain.state = null; this.brain.threat = null; this.brain.recovered = false;
+    this.blendT = 1; this.acc = 0; this.sensed = false;
+    this.tug = 0; this.tugDir = null; this.bumpT = 0;
+    this.hero.dip = 0; this.hero.lunge = null;
+    // (a moment to settle: bumps and props snapping back into place don't knock you
+    // straight back into a braced, stiff stance the instant you're back)
+    this.settleUntil = performance.now() + 700;
     this.headLocal = null;
     this.postSnap = null;
     this.pending = null;
@@ -476,6 +491,8 @@ export class Actor {
     if (this.poofed) { this.poofed = false; this.hero.setVisible(true); }
     this.crippled = false;
     this.tied = null;
+    // (bitten: a respawn is a clean start - the fever and the grey go)
+    if (this.infected) { const m = this.hero.mat?.skin; if (m && this.infected.skin0) m.color.copy(this.infected.skin0); this.infected = null; }
     this.wounds?.heal();
     this.hitLog = [];
     this.organs?.heal();
@@ -550,6 +567,35 @@ export class Actor {
   }
 
   // ---------- per frame ----------
+  /** The push this body's been given (pushV, m/s; press: how hard a hand is on it now) worked into its own steps and lean. */
+  pushed(dt, ctrl) {
+    const h = this.hero, P = this.pushV;
+    const press = this.pushPress || 0;
+    this.pushPress = Math.max(0, press - dt * 6);
+    let tx = 0, tz = 0;
+    if (P) {
+      const s = Math.hypot(P.x, P.z);
+      const f = Math.sin(h.yaw), c = Math.cos(h.yaw);
+      // (in the body's frame: + forward / + to its right)
+      const fwd = P.x * f + P.z * c, right = -P.x * c + P.z * f;
+      const k = 0.16 + press * 0.25;
+      tx = clamp(fwd * k, -0.5, 0.5);
+      tz = clamp(right * k, -0.45, 0.45);
+      if (s > 0.05) {
+        // (a little behind the push: the feet have to catch up with the trunk)
+        const run = s > 2.2, ws = run ? 4.8 : 1.7, step = clamp((s - 0.12) / s, 0, 1);
+        ctrl = { ...ctrl, move: ctrl.move.clone().multiplyScalar(clamp(1 - s, 0, 1)).add(new THREE.Vector3(P.x * step / ws, 0, P.z * step / ws)), faceYaw: ctrl.faceYaw ?? h.yaw, run, jump: false };
+      }
+      // friction: the shove dies away as they find their feet
+      P.multiplyScalar(Math.exp(-dt * (press > 0.05 ? 1.5 : 3.2)));
+      if (s < 0.01) P.set(0, 0, 0);
+    }
+    const kk = 1 - Math.exp(-dt * 10);
+    h.swayX = (h.swayX || 0) + (tx - (h.swayX || 0)) * kk;
+    h.swayZ = (h.swayZ || 0) + (tz - (h.swayZ || 0)) * kk;
+    return ctrl;
+  }
+
   update(dt, ctrl, colliders) {
     this.lastDt = dt || 1 / 60;
     if (this.remote) return;
@@ -562,6 +608,10 @@ export class Actor {
       this.heldT -= dt;
       if (ctrl) ctrl = { ...ctrl, move: ctrl.move.clone().multiplyScalar(0.3), run: false, jump: false };
     }
+    // pushed (vrtouch.js): the upper body gives first, then the feet step back under it - their own
+    // walking carries the shove, and it carries on a moment after you let go
+    if (this.mode === 'anim' && ctrl) ctrl = this.pushed(dt, ctrl);
+    else if (this.pushV) { this.pushV.set(0, 0, 0); this.hero.swayX = this.hero.swayZ = 0; }
     if (this.mode === 'anim') {
       // keep the last two animated poses so the ragdoll inherits the motion
       const t = this.prev; this.prev = this.cur; this.cur = t;

@@ -5,6 +5,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { groups, G_WORLD, G_CAR, G_DEBRIS, G_BODY } from './physics.js';
 import { DIM } from './character.js';
 import Delaunator from 'https://esm.sh/delaunator@5.0.1';
+import { posePositions } from './skinpose.js';
 
 /*
   Dismemberment: a blade that meets a limb edge-first and fast enough goes through it, and
@@ -58,7 +59,7 @@ const TORSO = new Set(['pelvis', 'spine', 'chest']);
 const MAX_CHUNKS = 40;
 // how many times one thing can be cut: a body (all its limbs together), or a piece and
 // everything that's been cut from it
-const MAX_CUTS = 10;
+const MAX_CUTS = 30;
 // edge speed a blade needs through a loose piece (nothing holds it: it doesn't take much)
 const NEED_LOOSE = 4.5;
 
@@ -118,68 +119,122 @@ export function makeTear(plane, amp, seed = (Math.random() * 1e6) | 0, blast = f
 // how deep (m) the tear runs either side of the plane
 const TEAR = { limb: 0.0065, torso: 0.011, loose: 0.0055, blast: 0.016 };
 
+// (growable int list: sliceGeometry's per-side vertex references)
+class IList {
+  constructor(n) { this.a = new Int32Array(Math.max(64, n)); this.n = 0; }
+  push3(x, y, z) {
+    if (this.n + 3 > this.a.length) { const b = new Int32Array(this.a.length * 2); b.set(this.a); this.a = b; }
+    this.a[this.n++] = x; this.a[this.n++] = y; this.a[this.n++] = z;
+  }
+}
+
+/*
+  Split a geometry by a plane. First every triangle is sorted (whole to one side, or clipped,
+  its new edge vertices noted as "t along i -> j"); each side is kept as a list of vertex
+  references. Then every attribute is written out in one tight pass of its own - the same
+  arithmetic as ever (interpolated in double, normals renormalised, skin taken from the nearer
+  end), just without building an object per vertex.
+*/
+// (a mesh's unindexed copy, kept while none of its attributes have changed: re-cut, re-opened
+// meshes don't pay for it again)
+const FLAT = new WeakMap(), AID = new WeakMap();
+let aid = 0;
+const idOf = (a) => { let i = AID.get(a); if (i === undefined) AID.set(a, (i = ++aid)); return i; };
+function flat(geo) {
+  if (!geo.index) return geo;
+  const names = Object.keys(geo.attributes);
+  const key = idOf(geo.index) + ':' + geo.index.version + '|' + names.map((n) => { const A = geo.attributes[n]; return n + ':' + idOf(A) + ':' + A.version + ':' + A.count; }).join(',');
+  const c = FLAT.get(geo);
+  if (c && c.key === key) return c.g;
+  const g = geo.toNonIndexed();
+  FLAT.set(geo, { key, g });
+  return g;
+}
+
 export function sliceGeometry(geo, plane, at = 'position', tear = null, force = null) {
-  const src = geo.index ? geo.toNonIndexed() : geo;
+  const src = flat(geo);
   const names = Object.keys(src.attributes);
-  const attrs = names.map((n) => src.attributes[n]);
-  const sizes = attrs.map((a) => a.itemSize);
-  const ni = names.indexOf('normal'), ai = names.indexOf(at);
-  const P = src.attributes[at];
-  const out = { pos: names.map(() => []), neg: names.map(() => []) };
+  const sizes = names.map((n) => src.attributes[n].itemSize);
+  const PA = src.attributes[at].array, PS = src.attributes[at].itemSize;
+  const n = src.attributes[at].count;
+  const sides = { pos: new IList(n * 0.6 + 64), neg: new IList(n * 0.6 + 64) };
+  // the new vertices: t along i -> j (referenced as -1 - index)
+  let ei = new Int32Array(256), ej = new Int32Array(256), et = new Float64Array(256), ne = 0;
+  const edge = (i, j, t) => {
+    if (ne === ei.length) {
+      const g = (A, T) => { const b = new T(A.length * 2); b.set(A); return b; };
+      ei = g(ei, Int32Array); ej = g(ej, Int32Array); et = g(et, Float64Array);
+    }
+    ei[ne] = i; ej[ne] = j; et[ne] = t;
+    return -1 - ne++;
+  };
   const segs = [];
   const _p = V();
-  const vert = (i) => attrs.map((a, k) => {
-    const o = new Array(sizes[k]);
-    for (let j = 0; j < sizes[k]; j++) o[j] = a.array[i * sizes[k] + j];
-    return o;
-  });
-  const lerpV = (a, b, t) => a.map((arr, k) => {
-    if (SKIN.has(names[k])) return (t < 0.5 ? arr : b[k]).slice();
-    const o = arr.map((x, j) => x + (b[k][j] - x) * t);
-    if (k === ni) { const l = Math.hypot(o[0], o[1], o[2]) || 1; o[0] /= l; o[1] /= l; o[2] /= l; }
-    return o;
-  });
-  const push = (side, a, b, c) => {
-    const S = out[side];
-    for (let k = 0; k < names.length; k++) S[k].push(...a[k], ...b[k], ...c[k]);
-  };
-  const poly = (side, p) => { for (let i = 1; i < p.length - 1; i++) push(side, p[0], p[i], p[i + 1]); };
-  const n = P.count;
+  const d = [0, 0, 0], vi = [0, 0, 0], pp = [0, 0, 0, 0], np = [0, 0, 0, 0];
+  const fan = (S, p, len) => { for (let i = 1; i < len - 1; i++) S.push3(p[0], p[i], p[i + 1]); };
+  // (a cut along the path the blade really took: not a plane, a surface bent off it)
+  const curve = tear?.curve || null;
   for (let i = 0; i < n; i += 3) {
-    const v = [vert(i), vert(i + 1), vert(i + 2)];
     // (a triangle that belongs wholly to one side whatever the plane says: skin of a limb)
     const f = force?.(i);
-    if (f) { push(f, ...v); continue; }
-    const d = v.map((x) => plane.distanceToPoint(_p.set(x[ai][0], x[ai][1], x[ai][2])));
-    const pc = (d[0] >= 0) + (d[1] >= 0) + (d[2] >= 0);
-    if (pc === 3) { push('pos', ...v); continue; }
-    if (pc === 0) { push('neg', ...v); continue; }
-    const pp = [], np = [], cut = [];
+    if (f) { sides[f].push3(i, i + 1, i + 2); continue; }
     for (let k = 0; k < 3; k++) {
-      const a = v[k], b = v[(k + 1) % 3], da = d[k], db = d[(k + 1) % 3];
-      (da >= 0 ? pp : np).push(a);
+      const o = (i + k) * PS;
+      _p.set(PA[o], PA[o + 1], PA[o + 2]);
+      d[k] = plane.distanceToPoint(_p) - (curve ? curve(_p) : 0);
+    }
+    const pc = (d[0] >= 0) + (d[1] >= 0) + (d[2] >= 0);
+    if (pc === 3) { sides.pos.push3(i, i + 1, i + 2); continue; }
+    if (pc === 0) { sides.neg.push3(i, i + 1, i + 2); continue; }
+    vi[0] = i; vi[1] = i + 1; vi[2] = i + 2;
+    let pn = 0, nn = 0, cuts = 0, c0 = null;
+    for (let k = 0; k < 3; k++) {
+      const k1 = (k + 1) % 3, da = d[k], db = d[k1];
+      if (da >= 0) pp[pn++] = vi[k]; else np[nn++] = vi[k];
       if ((da >= 0) !== (db >= 0)) {
-        const I = lerpV(a, b, da / (da - db));
-        pp.push(I); np.push(I);
-        cut.push(V(I[ai][0], I[ai][1], I[ai][2]));
+        const t = da / (da - db), a = vi[k] * PS, b = vi[k1] * PS;
+        const r = edge(vi[k], vi[k1], t);
+        pp[pn++] = r; np[nn++] = r;
+        const p = V(PA[a] + (PA[b] - PA[a]) * t, PA[a + 1] + (PA[b + 1] - PA[a + 1]) * t, PA[a + 2] + (PA[b + 2] - PA[a + 2]) * t);
+        if (cuts++ === 0) c0 = p; else segs.push([c0, p]);
       }
     }
-    poly('pos', pp); poly('neg', np);
-    if (cut.length === 2) segs.push(cut);
+    fan(sides.pos, pp, pn); fan(sides.neg, np, nn);
   }
-  const build = (S) => {
-    if (!S[0].length) return null;
+  // one attribute, one side: every referenced vertex written out
+  const fill = (name, size, A, R) => {
+    const isSkin = SKIN.has(name), isN = name === 'normal';
+    const out = new (name === 'skinIndex' ? Uint16Array : Float32Array)(R.n * size);
+    const L = R.a;
+    for (let v = 0, o = 0; v < R.n; v++, o += size) {
+      const r = L[v];
+      if (r >= 0) { const s0 = r * size; for (let q = 0; q < size; q++) out[o + q] = A[s0 + q]; continue; }
+      const e = -1 - r, t = et[e], ia = ei[e] * size, ib = ej[e] * size;
+      if (isSkin) { const s0 = t < 0.5 ? ia : ib; for (let q = 0; q < size; q++) out[o + q] = A[s0 + q]; continue; }
+      if (isN && size >= 3) {
+        const x = A[ia] + (A[ib] - A[ia]) * t, y = A[ia + 1] + (A[ib + 1] - A[ia + 1]) * t, z = A[ia + 2] + (A[ib + 2] - A[ia + 2]) * t;
+        const l = Math.hypot(x, y, z) || 1;
+        out[o] = x / l; out[o + 1] = y / l; out[o + 2] = z / l;
+        for (let q = 3; q < size; q++) out[o + q] = A[ia + q] + (A[ib + q] - A[ia + q]) * t;
+        continue;
+      }
+      for (let q = 0; q < size; q++) { const x = A[ia + q]; out[o + q] = x + (A[ib + q] - x) * t; }
+    }
+    return out;
+  };
+  const build = (R) => {
+    if (!R.n) return null;
     const g = new THREE.BufferGeometry();
-    names.forEach((nm, k) => g.setAttribute(nm, nm === 'skinIndex'
-      ? new THREE.Uint16BufferAttribute(S[k], sizes[k]) : new THREE.Float32BufferAttribute(S[k], sizes[k])));
+    names.forEach((nm, k) => g.setAttribute(nm, new THREE.BufferAttribute(fill(nm, sizes[k], src.attributes[nm].array, R), sizes[k])));
     if (tear) tearGeometry(g, at, tear);
     g.computeBoundingSphere();
     g.computeBoundingBox();
     return g;
   };
   const loops = chain(segs);
-  if (tear) for (const L of loops) for (const p of L) p.addScaledVector(tear.n, tear.off(p));
-  return { pos: build(out.pos), neg: build(out.neg), loops };
+  // (on a bent cut the outline's already on the surface: only the torn edge is added)
+  if (tear) { const nz = tear.noise || tear.off; for (const L of loops) for (const p of L) p.addScaledVector(tear.n, nz(p)); }
+  return { pos: build(sides.pos), neg: build(sides.neg), loops };
 }
 
 /**
@@ -193,9 +248,9 @@ function tearGeometry(g, at, T) {
   let any = false;
   for (let i = 0; i < n; i++) {
     p.fromBufferAttribute(A, i);
-    const d = Math.abs(T.plane.distanceToPoint(p));
+    const d = Math.abs(T.plane.distanceToPoint(p) - (T.curve ? T.curve(p) : 0));
     if (d >= T.band) continue;
-    const k = T.off(p) * (1 - d / T.band);
+    const k = (T.noise || T.off)(p) * (1 - d / T.band);
     p.addScaledVector(T.n, k);
     A.setXYZ(i, p.x, p.y, p.z);
     moved[i] = k || 1e-9; // (non-zero: "near the cut")
@@ -299,7 +354,56 @@ function bonesOf(P, M) {
 /** A tear made in one frame, seen from a mesh (rel: mesh -> that frame; pm: the plane in mesh space). */
 function tearIn(T, rel, pm) {
   const q = V();
-  return { plane: pm, n: pm.normal, band: T.band, amp: T.amp, off: (p) => T.off(q.copy(p).applyMatrix4(rel)) };
+  const at = (f) => (p) => f(q.copy(p).applyMatrix4(rel));
+  return { plane: pm, n: pm.normal, band: T.band, amp: T.amp, off: at(T.off),
+    curve: T.curve ? at(T.curve) : null, noise: T.noise ? at(T.noise) : null };
+}
+
+/**
+ * Bend a tear's plane into the surface the blade actually swept through the body: path is the
+ * blade, frame by frame while it was in there ({ c: a point on its edge line, a: its length },
+ * in the plane's frame). The cut follows it - curving with the arc, twisting as the blade
+ * turned, sliding as the body moved under it - as a height off the plane, so both halves and
+ * both faces still meet exactly.
+ */
+export function bendTear(T, path, given = null) {
+  const curve = given || pathCurve(T.plane, path);
+  if (!curve) return T;
+  const nz = T.off;
+  T.noise = nz; T.curve = curve;
+  T.off = (p) => curve(p) + nz(p);
+  return T;
+}
+
+/**
+ * The surface a blade's path swept, as a height off `plane` (along its normal) at each point -
+ * or null (too short a path to bend anything). Same frame as the path. (gash.js too: the
+ * opening while it's still going in follows the very same surface the cut through will.)
+ */
+export function pathCurve(plane, path) {
+  if (!path || path.length < 2) return null;
+  const n = plane.normal, o = plane.coplanarPoint(V());
+  const t = path[path.length - 1].c.clone().sub(path[0].c);
+  t.addScaledVector(n, -t.dot(n));
+  if (t.lengthSq() < 1e-6) return null;
+  t.normalize();
+  const w = V().crossVectors(n, t);
+  const S = path.map(({ c, a }) => {
+    const rc = c.clone().sub(o), aw = a.dot(w);
+    return { s: rc.dot(t), h: clamp(rc.dot(n), -0.12, 0.12), wc: rc.dot(w), slope: Math.abs(aw) > 0.25 ? clamp(a.dot(n) / aw, -1.2, 1.2) : 0 };
+  }).sort((x, y) => x.s - y.s);
+  const q = V();
+  const hAt = (k, wv) => clamp(k.h + k.slope * (wv - k.wc), -0.14, 0.14);
+  const curve = (p) => {
+    q.subVectors(p, o);
+    const s = q.dot(t), wv = q.dot(w);
+    if (s <= S[0].s) return hAt(S[0], wv);
+    for (let i = 1; i < S.length; i++) {
+      if (s <= S[i].s) { const A = S[i - 1], B = S[i], f = (s - A.s) / Math.max(1e-6, B.s - A.s); return hAt(A, wv) * (1 - f) + hAt(B, wv) * f; }
+    }
+    return hAt(S[S.length - 1], wv);
+  };
+  return curve;
 }
 
 const inPoly = (x, y, P) => {
@@ -731,6 +835,33 @@ function section(loops, T, anat = null, ink = 0) {
 }
 const smooth01 = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 
+/**
+ * Compile, ahead of time, the shaders a first cut would otherwise stop the game to build: the cut
+ * face, the opening's walls, and the body's own materials on the plain (unskinned) meshes a cut
+ * torso leaves behind. Nothing is drawn: it only fills the shader cache.
+ */
+export function warmGore(renderer, scene, camera, actors, extra = []) {
+  const box = new THREE.BufferGeometry();
+  box.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0.001, 0, 0, 0, 0.001, 0], 3));
+  box.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
+  box.setAttribute('color', new THREE.Float32BufferAttribute([1, 1, 1, 1, 1, 1, 1, 1, 1], 3));
+  box.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
+  const tmp = new THREE.Scene();
+  const mats = new Set([SECTION, ...extra]);
+  for (const a of actors) a.hero?.root?.traverse((o) => { if (o.isSkinnedMesh) for (const m of [].concat(o.material)) mats.add(m); });
+  for (const m of mats) {
+    const x = new THREE.Mesh(box, m);
+    x.castShadow = x.receiveShadow = true;
+    x.position.copy(camera.position).add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+    tmp.add(x);
+  }
+  const done = () => box.dispose();
+  try {
+    const p = renderer.compileAsync ? renderer.compileAsync(tmp, camera, scene) : (renderer.compile(tmp, camera, scene), null);
+    if (p?.then) p.then(done, done); else done();
+  } catch (e) { done(); }
+}
+
 // ---------------------------------------------------------------------------------------
 // The system
 // ---------------------------------------------------------------------------------------
@@ -779,16 +910,9 @@ function swap(arr, was, now, rec) {
  */
 function posedCopy(m) {
   const geo = m.geometry.clone();
-  const P = geo.attributes.position, N = geo.attributes.normal, n = P.count;
-  const pp = new Float32Array(n * 3), pn = new Float32Array(n * 3);
-  const a = V(), b = V();
-  for (let i = 0; i < n; i++) {
-    a.fromBufferAttribute(P, i);
-    if (N) b.fromBufferAttribute(N, i).multiplyScalar(0.01).add(a);
-    m.applyBoneTransform(i, a);
-    a.toArray(pp, i * 3);
-    if (N) { m.applyBoneTransform(i, b); b.sub(a).normalize().toArray(pn, i * 3); }
-  }
+  const N = geo.attributes.normal;
+  // (every vertex through its skinning, in bulk: skinpose.js - the same numbers applyBoneTransform gives)
+  const { pp, pn } = posePositions(m, !!N);
   geo.setAttribute('_posed', new THREE.BufferAttribute(pp, 3));
   if (N) geo.setAttribute('_posedN', new THREE.BufferAttribute(pn, 3));
   return geo;
@@ -832,7 +956,7 @@ function limbSide(m, geo, actor, goneNames) {
     for (let o = b; o; o = o.parent) if (byObj.has(o)) return byObj.get(o);
     return null;
   });
-  const src = geo.index ? geo.toNonIndexed() : geo;
+  const src = flat(geo); // (the same unindexed copy the slice itself then reads)
   const SI = src.attributes.skinIndex?.array, SW = src.attributes.skinWeight?.array;
   if (!SI || !SW) return null;
   const side = (v) => {
@@ -931,7 +1055,7 @@ export class Dismember {
    * gib: the piece doesn't come off whole - it bursts (a shotgun to the head): the stump's
    * made just the same, but what's past the cut is blown apart into gore and gone.
    */
-  sever(actor, part, point, normalW, vel, { seed = (Math.random() * 1e6) | 0, net = false, gib = false, hiY = null } = {}) {
+  sever(actor, part, point, normalW, vel, { seed = (Math.random() * 1e6) | 0, net = false, gib = false, hiY = null, path = null } = {}) {
     if (actor.god) return false; // (admin.js: god mode)
     if (!settings.dismember) return false;
     const rd = actor.rd, P = rd.parts[part];
@@ -939,10 +1063,6 @@ export class Dismember {
     const kind = P.kind, S = SPAN[kind];
     if (!S || (actor._cut?.count || 0) >= MAX_CUTS) return false;
     const puppet = !!actor.remote;
-    if (!puppet) {
-      if (actor.mode !== 'ragdoll') actor.goRagdoll('collapse');
-      if (actor.mode !== 'ragdoll') return false;
-    }
     const h = actor.hero, g = actor.groups[part];
     freshMatrices(actor);
     const gp = V(), gq = new THREE.Quaternion(), gs = V();
@@ -953,11 +1073,32 @@ export class Dismember {
     const pL = g.worldToLocal(point.clone());
     const nL = normalW.clone().applyQuaternion(gq.clone().invert()).normalize();
     if (nL.y * S.dir < 0) nL.negate();
-    // steep enough across the bone to actually part it (a glancing, lengthwise cut still
-    // goes through at the angle it came in, just not along the whole limb)
-    // (a torso even more so: a steep plane would run on out through the hips or the neck)
-    const minY = S.torso ? 0.82 : 0.5;
+    // free slicing: a blade's cut goes exactly where the blade went. One that doesn't cross the
+    // bone inside this part - along the limb, a glancing one, the top of the skull, the face -
+    // takes off just the flesh on the far side of it (shave); the limb stays on
+    if (!gib && hiY == null && !S.torso) {
+      const yx = Math.abs(nL.y) > 1e-4 ? nL.dot(pL) / nL.y : Infinity * S.dir;
+      const pastEnd = S.dir < 0 ? yx < S.end : yx > S.end;
+      const pastJoint = S.dir < 0 ? yx > S.lo + 0.05 : yx < S.lo - 0.05;
+      const skull = kind === 'head' && yx > S.hi + 0.02;
+      if (Math.abs(nL.y) < 0.22 || pastEnd || pastJoint || skull) return this.shave(actor, part, pL, nL, vel, seed, net, path);
+    }
+    // (only a cut that parts the body knocks them down: a ragdoll from here on)
+    if (!puppet) {
+      if (actor.mode !== 'ragdoll') actor.goRagdoll('collapse');
+      if (actor.mode !== 'ragdoll') return false;
+      freshMatrices(actor);
+    }
+    // across the bone it parts the limb at the very angle it came in (a torso a little less
+    // steep: a plane that steep would run on out through the hips or the neck)
+    const minY = S.torso ? 0.5 : 0.22;
+    let bent = !!path;
+    // (the path's bends off the plane the blade really went in on - what the opening showed -
+    // kept even if the plane itself has to be steepened or moved along the bone below)
+    const nL0 = nL.clone();
+    const curve0 = path ? pathCurve(new THREE.Plane().setFromNormalAndCoplanarPoint(nL0, pL), path) : null;
     if (nL.y * S.dir < minY) {
+      bent = false;
       const xz = Math.hypot(nL.x, nL.z) || 1;
       const k = Math.sqrt(1 - minY * minY) / xz;
       nL.set(nL.x * k, minY * S.dir, nL.z * k);
@@ -966,7 +1107,9 @@ export class Dismember {
     let y0 = nL.dot(pL) / nL.y;
     // (hiY: a cut allowed further along than a blade's could be - a blast through the skull)
     const hi = hiY ?? (gib && kind === 'head' ? 0.2 : S.hi);
+    const yRaw = y0;
     y0 = S.dir < 0 ? clamp(y0, hi, S.lo) : clamp(y0, S.lo, hi);
+    if (Math.abs(y0 - yRaw) > 0.01) bent = false;
     // a stump again: only closer in than it was cut before (what was past that is long gone)
     const oldCut = P.cutY;
     if (oldCut !== undefined) {
@@ -1029,6 +1172,9 @@ export class Dismember {
     // outline gathered there, for the one solid face at the end
     // (a gib - a head blown open - is ragged all round, not cut)
     const Tc = gib ? makeTear(plane, TEAR.blast, seed, true) : makeTear(plane, S.torso ? TEAR.torso : TEAR.limb, seed);
+    // (the blade's real path through them: the cut bends along it)
+    if (bent) bendTear(Tc, path);
+    else if (curve0 && !gib) { const k = Math.max(0, nL0.dot(nL)); bendTear(Tc, null, (p) => curve0(p) * k); }
     const outlines = [];
     const gather = (loops, rel) => { for (const L of loops) outlines.push(L.map((p) => p.clone().applyMatrix4(rel))); };
     // (a stump cut again: its old face is past this cut, and goes with the piece)
@@ -1038,6 +1184,12 @@ export class Dismember {
       // the plane in this mesh's space
       const rel = new THREE.Matrix4().multiplyMatrices(gInv, m.matrixWorld);
       const pm = plane.clone().applyMatrix4(_m.copy(rel).invert());
+      // (wholly to one side - even allowing for the bend - it needn't be cut to know: the same
+      // as the cut would say, without going over every triangle)
+      const bs = m.geometry.boundingSphere || (m.geometry.computeBoundingSphere(), m.geometry.boundingSphere);
+      const sd = pm.distanceToPoint(bs.center), reach = bs.radius + (Tc.curve ? 0.15 : 0) + 1e-6;
+      if (sd < -reach) continue;                              // all on the body side: untouched
+      if (sd > reach) { place(copyTree(m), m.matrixWorld); hide(m, rec); continue; } // all of it comes away
       const cut = sliceGeometry(m.geometry, pm, 'position', tearIn(Tc, rel, pm));
       if (!cut.pos) continue;                                 // all on the body side: untouched
       if (!cut.neg) {
@@ -1416,6 +1568,131 @@ export class Dismember {
     }
     this.ctx.sfx?.('gib', 1);
     this.ctx.sfx?.('splat', 0.8);
+  }
+
+  /**
+   * A slice that misses the bone: what's on the far side of the plane (part frame: pL, nL) comes
+   * off as its own piece of flesh - skin, clothes, an ear, the face, the crown of the head - cut
+   * for real through every mesh of the part, with a solid face on both sides. The limb, its
+   * bone and its physics stay as they were.
+   */
+  shave(actor, part, pL, nL, vel, seed = (Math.random() * 1e6) | 0, net = false, path = null) {
+    const rd = actor.rd, P = rd.parts[part], S = SPAN[P.kind], g = actor.groups[part];
+    const puppet = !!actor.remote;
+    freshMatrices(actor);
+    const gp = V(), gq = new THREE.Quaternion(), gs = V();
+    g.matrixWorld.decompose(gp, gq, gs);
+    const scale = Math.abs(gs.x);
+    // the side the bone runs on stays; "+" is the side that comes off
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(nL.clone(), pL);
+    const ref = P.kind === 'head' ? V(0, 0.12, 0) : V(0, (S.lo + (P.cutY !== undefined ? P.cutY / scale : S.hi)) / 2, 0);
+    if (plane.distanceToPoint(ref) > 0) plane.negate();
+    const rec = (actor._cut ||= { hidden: [], added: [], swaps: [], count: 0 });
+    if (rec.count >= MAX_CUTS) return false;
+    if (!actor.unsever) actor.unsever = () => this.restore(actor);
+
+    const chunk = new THREE.Group();
+    chunk.position.copy(gp); chunk.quaternion.copy(gq); chunk.scale.copy(gs);
+    this.ctx.scene.add(chunk);
+    chunk.updateMatrixWorld(true);
+    _mi.copy(chunk.matrixWorld).invert();
+    const place = (o, world) => {
+      o.matrixAutoUpdate = false;
+      o.matrix.multiplyMatrices(_mi, world);
+      o.matrix.decompose(o.position, o.quaternion, o.scale);
+      chunk.add(o);
+    };
+    const partGroups = new Set(Object.values(actor.groups));
+    const own = [];
+    const walk = (o) => {
+      for (const c of o.children) {
+        if (partGroups.has(c) || c.userData.notBody) continue;
+        if (c.isMesh && !c.isSkinnedMesh && !c.userData.cut) own.push(c);
+        walk(c);
+      }
+    };
+    walk(g);
+    const W = actor.wounds?.parts[part];
+    const gInv = new THREE.Matrix4().copy(g.matrixWorld).invert();
+    const Tc = bendTear(makeTear(plane, TEAR.limb, seed), path);
+    const outlines = [];
+    let moved = 0;
+    for (const m of own) {
+      if (m.userData.cut) continue; // (hidden with a parent that went already)
+      if (m.userData.wardrobe && !m.visible) continue;
+      const rel = new THREE.Matrix4().multiplyMatrices(gInv, m.matrixWorld);
+      const pm = plane.clone().applyMatrix4(_m.copy(rel).invert());
+      const cut = sliceGeometry(m.geometry, pm, 'position', tearIn(Tc, rel, pm));
+      if (!cut.pos) continue;
+      moved++;
+      if (!cut.neg) { place(copyTree(m), m.matrixWorld); hide(m, rec); continue; }
+      const stump = new THREE.Mesh(cut.neg, m.material);
+      stump.userData = { ...m.userData, cut: false, piece: true };
+      stump.castShadow = m.castShadow; stump.receiveShadow = m.receiveShadow;
+      stump.matrixAutoUpdate = false;
+      stump.matrix.copy(m.matrix);
+      m.parent.add(stump);
+      rec.added.push(stump);
+      const off = new THREE.Mesh(cut.pos, m.material);
+      off.userData = { ...m.userData, cut: false, piece: true };
+      off.castShadow = m.castShadow;
+      place(off, m.matrixWorld);
+      if (!m.userData.cap) for (const L of cut.loops) outlines.push(L.map((p) => p.clone().applyMatrix4(rel)));
+      if (W) swap(W.meshes, m, stump, rec);
+      // (what hangs off this mesh - an eyelid, a pupil - is cut on its own, under the new one)
+      for (const ch of [...m.children]) { m.remove(ch); stump.add(ch); }
+      hide(m, rec);
+    }
+    if (!moved) { chunk.removeFromParent(); return false; }
+    rec.count++;
+    const anat = anatomyOf(actor, new Set([part]), gInv, bonesOf(P, new THREE.Matrix4()));
+    const sec = section(outlines, Tc, anat, inkOf(actor));
+    if (sec) {
+      for (const c of sec(1)) { g.add(c); rec.added.push(c); }
+      for (const c of sec(-1)) place(c, g.matrixWorld);
+    }
+    chunk.traverse((o) => { if (o !== chunk && o.isMesh) o.castShadow = true; });
+    // its body: a hull round what came off
+    const pts = [];
+    chunk.updateMatrixWorld(true);
+    for (const m of chunk.children) {
+      if (!m.isMesh || m.userData.cap) continue;
+      const A_ = m.geometry.attributes.position;
+      const step = Math.max(1, Math.floor(A_.count / 120));
+      for (let i = 0; i < A_.count; i += step) { _s.fromBufferAttribute(A_, i).applyMatrix4(m.matrix).multiply(gs); pts.push(_s.x, _s.y, _s.z); }
+    }
+    if (pts.length < 12) for (const c of chunk.children) if (c.isMesh) { const A_ = c.geometry.attributes.position; for (let i = 0; i < A_.count; i += 3) { _s.fromBufferAttribute(A_, i).applyMatrix4(c.matrix).multiply(gs); pts.push(_s.x, _s.y, _s.z); } }
+    const box = new THREE.Box3().setFromArray(pts.length ? pts : [0, 0, 0, 0.01, 0.01, 0.01]);
+    const sz = box.getSize(V());
+    const mass = clamp(sz.x * sz.y * sz.z * 500, 0.03, P.def.m * 0.5);
+    const body = this.ctx.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(gp.x, gp.y, gp.z).setRotation(gq)
+      .setLinearDamping(0.05).setAngularDamping(0.35).setCcdEnabled(true));
+    const make = (desc) => this.ctx.world.createCollider(desc.setMass(mass).setFriction(0.85).setRestitution(0.04).setCollisionGroups(GRACE), body);
+    let col = null;
+    if (pts.length >= 12 && Math.min(sz.x, sz.y, sz.z) > 0.006) { try { col = make(RAPIER.ColliderDesc.convexHull(new Float32Array(pts))); } catch { col = null; } }
+    if (!col) { const cc = box.getCenter(V()); col = make(RAPIER.ColliderDesc.ball(clamp(Math.min(sz.x, sz.y, sz.z) / 2, 0.012, 0.06)).setTranslation(cc.x, cc.y, cc.z)); }
+    // off it goes: the part's own motion, the blade carrying it on, away from the cut
+    const lv = puppet ? V() : rd.vel(part);
+    const nW = plane.normal.clone().applyQuaternion(gq);
+    const push = nW.clone().multiplyScalar(0.9).addScaledVector(vel, 0.12);
+    body.setLinvel({ x: lv.x + push.x, y: lv.y + push.y + 0.3, z: lv.z + push.z }, true);
+    body.setAngvel({ x: (Math.random() - 0.5) * 5, y: (Math.random() - 0.5) * 5, z: (Math.random() - 0.5) * 5 }, true);
+    const pOn = plane.projectPoint(pL, V());
+    const face = { p: pOn.clone().multiplyScalar(scale), n: plane.normal.clone().negate() };
+    const what = P.kind === 'head' ? 'head' : 'flesh';
+    const ch0 = { group: chunk, body, cols: [col], face, t: 0, solid: false, cuts: 1, anat, actor, gen: actor.cutGen || 0, part, what };
+    this.chunks.push(ch0);
+    while (this.chunks.length > MAX_CHUNKS) this.drop(this.chunks[0]);
+    // what it does to them: a long open wound along the cut, bleeding hard
+    const pW = g.localToWorld(pOn.clone());
+    actor.wounds?.chop(part, pW, nW.clone().negate(), vel, V(0, 1, 0).applyQuaternion(gq), 1.3);
+    if (!puppet && !actor.brain.dead) actor.onPain?.(part, 'pain', 2);
+    const B = this.ctx.blood;
+    if (B) for (let i = 0; i < 3; i++) B.inked(actor).spray(pW, nW.clone().add(V(Math.random() - 0.5, Math.random() * 0.4, Math.random() - 0.5)).normalize(), 2.2, 10, 0.5, 1);
+    if (!net) this.onCut?.(actor, part, pL, nL, vel, seed, false);
+    this.ctx.sfx?.('flesh', 1);
+    this.ctx.sfx?.('chop', 0.6);
+    return true;
   }
 
   drop(c) {

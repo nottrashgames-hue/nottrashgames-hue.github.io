@@ -516,33 +516,52 @@ export class BloodSurfaces {
     if (noInk(this.takeInk())) return;
     const { s, t } = S.st(p);
     const [vs, vt] = S.dir(vel);
+    // sp: along the surface (which way, and how hard, it skids), into: straight at it
     const sp = Math.hypot(vs, vt);
     const into = Math.abs(vel.dot(S.n));
+    const speed = Math.hypot(sp, into);
     const ang = Math.atan2(vt, vs);
-    const stretch = 1 + clamp(sp / Math.max(into, 0.5) * 0.6, 0, 3.5);
+    // the shallower it comes in, the longer it streaks (an ellipse's length / width ~ 1 / sin of the
+    // impact angle, as real spatter does), and the faster, the further it spreads out
+    const sinA = into / Math.max(speed, 1e-3);
+    const stretch = clamp(1 / Math.max(sinA, 0.18), 1, 5.5) * (1 + clamp(sp * 0.05, 0, 0.5));
+    size *= 1 + clamp(speed * 0.045, 0, 0.7);
+    const L = size * stretch, W = size / Math.sqrt(stretch);
     S.paint((g) => {
       penTranslate(s, t);
-      penRotate(ang);
+      penRotate(ang); // +x: the way it was going
       const a = 0.55 + 0.4 * amount;
-      dab(g, size * (stretch - 1) * 0.3, 0, size * stretch * 0.75, size * 0.75 / Math.sqrt(stretch), 0, a);
-      const lobes = 2 + Math.floor(Math.random() * 4);
+      // the body: round where it first struck, drawn out ahead of that
+      dab(g, L * 0.25, 0, L * 0.7, W * 0.8, 0, a);
+      dab(g, 0, 0, W * 0.95, W * 0.95, 0, a);
+      // lobes along the streak, not round it
+      const lobes = 2 + Math.floor(Math.random() * 3);
       for (let i = 0; i < lobes; i++) {
-        const q = rnd(0, Math.PI * 2);
-        dab(g, Math.cos(q) * size * stretch * 0.45, Math.sin(q) * size * 0.4, size * rnd(0.3, 0.5), size * rnd(0.3, 0.5), 0, a * 0.8);
+        const u = rnd(-0.1, 0.8);
+        dab(g, L * u, rnd(-1, 1) * W * 0.45, W * rnd(0.35, 0.6) * (1 + u * 0.3), W * rnd(0.3, 0.5), 0, a * 0.85);
       }
-      // droplets thrown ahead, each elongated back toward the source
-      const n = Math.floor(clamp(1 + sp * 2.2 * amount, 0, 18));
-      for (let i = 0; i < n; i++) {
-        const d = size * stretch * 0.7 + rnd(0.01, 0.05 + sp * 0.05);
-        const off = rnd(-1, 1) * d * 0.5 / (1 + sp * 0.3);
-        const r = rnd(0.004, 0.011) * (0.7 + amount * 0.5);
-        dab(g, d, off, r * (1.2 + sp * 0.25), r, Math.atan2(off, d) * 0.3, rnd(0.6, 0.95));
-        if (sp > 1.5 && Math.random() < 0.5) {
-          const L = rnd(0.01, 0.025) * sp;
-          for (let k = 1; k <= 3; k++) dab(g, d - (L * k) / 3, off * (1 - k * 0.03), r * 0.9, r * (0.7 - k * 0.12), 0, 0.5);
+      // a streak: the leading edge tapering out into a tail, longer the faster it was skidding
+      if (stretch > 1.4) {
+        const tail = L * (0.4 + 0.25 * stretch) + sp * 0.012;
+        const k = 5;
+        for (let i = 1; i <= k; i++) {
+          const f = i / k;
+          dab(g, L * 0.85 + tail * f, rnd(-1, 1) * W * 0.06, W * (0.5 - 0.35 * f), W * (0.45 - 0.33 * f), 0, a * (0.95 - 0.4 * f));
         }
       }
-    }, ...box(s, t, size * stretch * 1.3 + 0.08 + sp * 0.06));
+      // spatter: thrown ahead in a cone that narrows as it skids harder; a hard straight-down hit
+      // throws a ring of it all round instead (a crown)
+      const n = Math.floor(clamp(1 + speed * 1.6 * amount, 0, 20));
+      const cone = Math.PI * clamp(1.1 - (stretch - 1) * 0.28, 0.12, 1);
+      for (let i = 0; i < n; i++) {
+        const q = rnd(-cone, cone);
+        const d = W + rnd(0.01, 0.03 + speed * 0.012) * (1 + (stretch - 1) * 0.35);
+        const x = Math.cos(q) * d + (q > -0.5 && q < 0.5 ? L * 0.4 : 0), y = Math.sin(q) * d * 0.8;
+        const r = rnd(0.003, 0.009) * (0.7 + amount * 0.5);
+        // each droplet stretched along the way it flew out
+        dab(g, x, y, r * (1 + speed * 0.12 + (stretch - 1) * 0.3), r, Math.atan2(y, x - L * 0.2) * 0.9, rnd(0.6, 0.95));
+      }
+    }, ...box(s, t, L * 2.2 + 0.08 + speed * 0.05));
     S.wetAdd(s, t, size * 0.8, 0.5 * amount);
   }
 
@@ -551,14 +570,19 @@ export class BloodSurfaces {
     if (noInk(this.takeInk())) return;
     const { s, t } = S.st(p);
     const [vs, vt] = S.dir(vel);
-    const sp = Math.hypot(vs, vt);
+    const sp = Math.hypot(vs, vt), into = Math.abs(vel.dot(S.n));
+    const sinA = into / Math.max(Math.hypot(sp, into), 1e-3);
+    const st = clamp(1 / Math.max(sinA, 0.2), 1, 4.5);
+    const ang = Math.atan2(vt, vs), c = Math.cos(ang), sn = Math.sin(ang);
     S.paint((g) => {
-      dab(g, s, t, r * (1.6 + sp * 0.6), r * 1.6, Math.atan2(vt, vs), 0.9);
-      if (Math.random() < 0.5) {
+      dab(g, s, t, r * 1.6 * st, r * 1.6 / Math.sqrt(st), ang, 0.9);
+      // (a drop that came in at a slant leaves a little tail ahead of it)
+      if (st > 1.5) dab(g, s + c * r * 2.2 * st, t + sn * r * 2.2 * st, r * 0.9 * st * 0.6, r * 0.5, ang, 0.7);
+      else if (Math.random() < 0.5) {
         const q = rnd(0, Math.PI * 2);
         dab(g, s + Math.cos(q) * r * 2.6, t + Math.sin(q) * r * 2.6, r * 0.6, r * 0.6, 0, 0.7);
       }
-    }, ...box(s, t, r * (4 + sp * 0.6)));
+    }, ...box(s, t, r * (4 + st * 3)));
     S.wetAdd(s, t, 0.02, 0.06);
   }
 

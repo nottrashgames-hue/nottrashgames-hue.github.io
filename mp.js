@@ -910,7 +910,7 @@ export class Multiplayer {
     if (!to || to === this.me) return;
     const loc = (name, p) => { const G = a.groups[name] || a.groups.pelvis; G.updateWorldMatrix(true, false); return vec(G.worldToLocal(_v.copy(p))); };
     let x;
-    if (kind === 'shot') x = [args[0], loc(args[0], args[1]), vec(args[2])];
+    if (kind === 'shot') x = [args[0], loc(args[0], args[1]), vec(args[2]), typeof args[3] === 'string' ? args[3] : null];
     else if (kind === 'struck') {
       const [name, point, vel, n, w, by] = args;
       const ws = { ...w };
@@ -977,7 +977,7 @@ export class Multiplayer {
     // (the wound is laid on the meshes where they're drawn now: limbs too, not the last render)
     freshMatrices(a);
     const pt = (name, l) => { const G = a.groups[name] || a.groups.pelvis; G.updateWorldMatrix(true, false); return G.localToWorld(unvec(l)); };
-    if (h === 'shot') a.shot(x[0], pt(x[0], x[1]), unvec(x[2]));
+    if (h === 'shot') a.shot(x[0], pt(x[0], x[1]), unvec(x[2]), typeof x[3] === 'string' ? x[3].slice(0, 40) : null);
     else if (h === 'struck') {
       const w = { ...x[4] };
       if (Array.isArray(w.axis)) w.axis = unvec(w.axis);

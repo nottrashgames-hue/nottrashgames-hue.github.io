@@ -36,7 +36,12 @@ import { Throwables, Thrower, THROWABLES, PROJECTILES } from './throwables.js';
 import { Infection } from './infect.js';
 import { Ropes } from './rope.js';
 import { Med, MED, treat as medTreat, dress as medDress } from './med.js';
-import { Dismember } from './slice.js';
+import { Dismember, warmGore } from './slice.js';
+import { WALL as GASH_WALL } from './gash.js';
+import { SlicePieces } from './slicing/SlicePieces.js';
+import { SliceFX } from './slicing/SliceFX.js';
+import { SliceDebug } from './slicing/SliceDebug.js';
+import { TARGETS, placeTarget } from './slicing/SliceTargets.js';
 import { Kick } from './kick.js';
 import { engineLoop } from './sfx.js';
 import { Multiplayer } from './mp.js';
@@ -52,6 +57,7 @@ import { Wanted } from './wanted.js';
 import { Police, copLook, capMesh } from './police.js';
 import { buildTower } from './tower.js';
 import { buildArena, buildObby, buildMenuRoom, buildRoom } from './sandbox-maps.js';
+import { buildRacetrack } from './racetrack.js';
 import { MenuBoard } from './mainmenu.js';
 import { DressingBooth } from './booth.js';
 import { Loading } from './loading.js';
@@ -76,6 +82,9 @@ import { dentEars, undentTree } from './dent.js';
 import { VRMode } from './vr.js';
 import { VRSpawn } from './vrspawn.js';
 import { SelfHud } from './selfhud.js';
+import { DoorHint } from './doorhint.js';
+import { Dash } from './dash.js';
+import { Construction } from './construction.js';
 
 // The world is built from a fixed random seed, so every player's copy of a level starts out
 // identical (same people, same cars, same looks): multiplayer then only has to keep it in step.
@@ -123,7 +132,7 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
 // levels: picked from ?level=, else the last one played
 // (a fresh visit starts in the main menu room; a map is picked from its wall)
-const LEVELS = { menu: buildMenuRoom, baseplate: buildBaseplate, room: buildRoom };
+const LEVELS = { menu: buildMenuRoom, baseplate: buildBaseplate, room: buildRoom, racetrack: buildRacetrack };
 let levelName = new URLSearchParams(location.search).get('level') || 'menu';
 if (!LEVELS[levelName]) levelName = 'menu';
 let IN_MENU = levelName === 'menu';
@@ -157,6 +166,10 @@ const hero = new Actor(scene, world, { ...wearSpecial(sanitizeLook(localLook()),
 // your own weapon swung into yourself, G-shoving yourself)
 let selfHurt = false;
 hero.untouchable = true;
+// you can't die: hurt as badly as you like, you never bleed out or stop (and can always get up: standUp)
+hero.invincible = true;
+// and nothing keeps you down: broken legs, a broken back, fainting - you're hurt, but you get up
+hero.alwaysRise = true;
 {
   const shot = hero.shot.bind(hero), struck = hero.struck.bind(hero), shove = hero.shove.bind(hero);
   hero.shot = (...a) => { if (selfHurt) return shot(...a); };
@@ -209,7 +222,26 @@ hero.hero.reset(SPAWN, SPAWN_YAW);
 
 // ---- cars: parked along the curbs, and traffic with drivers at the wheel ----
 const vehicles = new Vehicles(scene, world, { env: level.env, sfx, colliders, camera });
-for (const p of level.parking || []) vehicles.add(p.kind, p.color, new THREE.Vector3(p.x, -0.02, p.z), p.yaw, p.interior || 0);
+// a map's own parked cars are its own: put away when you leave it, back where they were when you return
+const levelCars = {};
+function parkLevelCars(name, L) {
+  const have = levelCars[name];
+  if (have) {
+    for (const c of have) { c.m.root.visible = true; c.body.setEnabled?.(true); if (!vehicles.cars.includes(c)) vehicles.cars.push(c); c.reset(); }
+    return;
+  }
+  levelCars[name] = (L.parking || []).map((p) => vehicles.add(p.kind, p.color, new THREE.Vector3(p.x, -0.02, p.z), p.yaw, p.interior || 0));
+}
+function stashLevelCars(name) {
+  for (const c of levelCars[name] || []) {
+    for (const s of c.seats) if (s.occ) vehicles.exit(s.occ);
+    const i = vehicles.cars.indexOf(c);
+    if (i >= 0) vehicles.cars.splice(i, 1);
+    c.m.root.visible = false;
+    c.body.setEnabled?.(false);
+  }
+}
+parkLevelCars(levelName, level);
 const traffic = level.roads ? new Traffic(level.roads, vehicles, sfx) : null;
 const TRAFFIC_COLS = [0xb0302a, 0x2a4d8f, 0xdedede, 0x1d1d1f, 0x6d7278, 0x2e6b4a, 0xc9a13a, 0x7a2f55, 0xe5e1d6];
 const trafficCars = (traffic ? traffic.spawns(level.traffic || 7) : []).map((sp, i) => {
@@ -376,6 +408,8 @@ if (station) {
 }
 const animals = [];
 const actors = [hero, ...npcs.map((n) => n.actor)];
+// (the shaders a first cut needs, built in the background now instead of mid-swing)
+setTimeout(() => { try { warmGore(renderer, scene, camera, actors, [GASH_WALL]); } catch (e) { console.warn('[gore] warmup', e); } }, 1500);
 const blood = new BloodSystem(scene, colliders);
 blood.floor.painter.renderer = renderer; // (stains are painted on the GPU: bloodpaint.js)
 for (const a of actors) blood.addActor(a);
@@ -971,9 +1005,9 @@ function scatterLitter() {
     // and a few bits right where you start
     litter.scatter(() => { const a = Math.random() * 6.283, r = 2 + Math.random() * 5; return SPAWN.clone().add(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r)); }, groundAt, 10);
   }
-  else if (level.npcSpot) litter.scatter(() => level.npcSpot(), groundAt, 75);
+  else if (level.npcSpot && !level.clean) litter.scatter(() => level.npcSpot(), groundAt, 75);
   // (the baseplate is left clean)
-  else if (levelName !== 'baseplate' && levelName !== 'room' && !IN_MENU) litter.scatter(() => { const a = Math.random() * 6.283, r = 2 + Math.random() * 9; return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r); }, groundAt, 22);
+  else if (levelName !== 'baseplate' && levelName !== 'room' && levelName !== 'racetrack' && !level.clean && !IN_MENU) litter.scatter(() => { const a = Math.random() * 6.283, r = 2 + Math.random() * 9; return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r); }, groundAt, 22);
 }
 scatterLitter();
 /**
@@ -999,11 +1033,26 @@ const kick = new Kick(hero, { actors, sfx, hitWorld, impact: meleeCtx.impact, sh
 // double-tap T: throw whatever's in your hand
 // blades through limbs: cut where they met, the piece flies off (slice.js)
 const dismember = new Dismember({ scene, world, blood, sfx, debris });
+// boards, nails, bricks and cement (room / baseplate: the B / ~ spawn menus)
+const construction = new Construction({ scene, world, sfx, blood,
+  actors: () => actors, owner: () => hero,
+  hammers: () => melees.filter((m) => m.type === 'hammer'),
+  self: () => new Set((hero.rd?.list || []).filter((p) => !p.gone).map((p) => p.body.handle)),
+  buzz: (k) => { if (vr?.on) for (const h of ['left', 'right']) vr.buzz?.(h, k, 40); },
+});
+const BUILD_LEVELS = new Set(['room', 'baseplate']);
+const grabChunks = () => (construction.items.length ? dismember.chunks.concat(construction.items) : dismember.chunks);
 meleeCtx.dismember = dismember;
+// the blade slicer (slicing/): sliced pieces, the blood / sound / haptics of a cut, the debug view
+const slicePieces = new SlicePieces({ scene, world, blood, sfx });
+const sliceFx = new SliceFX({ scene, blood, sfx, castSeg: meleeCtx.castSeg });
+meleeCtx.slicePieces = slicePieces;
+meleeCtx.sliceFx = sliceFx;
+const sliceDebug = new SliceDebug(scene, camera, slicePieces, () => melees.filter((m) => m.cutter).map((m) => m.cutter));
 const throws = new Throws({ actors, sfx, aimPoint: gun.aimPoint, scene, dismember });
 meleeCtx.throws = throws;
 // bare hands on people and loose body parts: Z for people, double-tap E for a loose piece
-const grabber = new Grabber(hero, { actors, chunks: () => dismember.chunks, sfx, aimPoint: gun.aimPoint,
+const grabber = new Grabber(hero, { actors, chunks: grabChunks, sfx, aimPoint: gun.aimPoint,
   carrying: () => !!carry.item,
   sever: (a, part, point, normal, vel) => dismember.sever(a, part, point, normal, vel),
   tug: (a, grips, done, fling) => mp?.tug(a, grips, done, fling) });
@@ -1592,6 +1641,10 @@ function resetWorld(fresh = true) {
   for (const n of npcs) n.convo?.end(true);
   fists.cancel();
   thrower.cancel();
+  // (nothing still in hand or mid-cut carries over into the fresh world)
+  grabber.endRip(); grabber.release();
+  tugged.map.clear();
+  for (const m of melees) m.cutter?.reset();
   nades.clear();
   wanted.clear();
   bubbles.clear();
@@ -1600,6 +1653,10 @@ function resetWorld(fresh = true) {
   crouching = false;
   debris.clear();
   dismember.clear();
+  vr.letGo?.('left'); vr.letGo?.('right');
+  construction.clear();
+  slicePieces.clear();
+  sliceFx.clear();
   props.reset();
   litter.clear();
   // (what other players have hold of stays theirs)
@@ -2198,27 +2255,7 @@ sun.shadow.camera.updateProjectionMatrix();
     sun.shadow.map?.dispose();
     sun.shadow.map = null;
   });
-  // full bright: every light off, one flat white ambient that shows each surface's own colour
-  const flat = new THREE.AmbientLight(0xffffff, Math.PI);
-  const tone = renderer.toneMapping, env = scene.environment;
-  let lit = null;
-  onSetting('fullbright', (on) => {
-    if (on && !lit) {
-      lit = [];
-      scene.traverse((o) => { if (o.isLight && o !== flat) { lit.push([o, o.intensity]); o.intensity = 0; } });
-      scene.add(flat);
-      renderer.toneMapping = THREE.NoToneMapping;
-      scene.environment = null;
-      recompile();
-    } else if (!on && lit) {
-      for (const [o, i] of lit) o.intensity = i;
-      lit = null;
-      flat.removeFromParent();
-      renderer.toneMapping = tone;
-      scene.environment = env;
-      recompile();
-    }
-  });
+  applyFullbright();
   const fog = scene.fog, far = camera.far;
   onSetting('fog', (on) => {
     scene.fog = on ? fog : null;
@@ -2536,6 +2573,25 @@ function nukeFlash(k) {
   el.style.opacity = '0';
 }
 
+// ---- construction pieces (room / baseplate) ----
+const BUILD_ITEMS = [
+  { id: 'board', name: 'Board' }, { id: 'nail', name: 'Nails (×6)' }, { id: 'hammer', name: 'Hammer' },
+  { id: 'brick', name: 'Brick' }, { id: 'cement', name: 'Cement' },
+];
+function spawnBuild(type, at, yaw = 0) {
+  if (!BUILD_LEVELS.has(levelName)) return;
+  if (type === 'hammer') {
+    const it = new Melee('hammer', scene, debris, meleeCtx, lyingPose('hammer', at, yaw + Math.PI / 2));
+    melees.push(it); bought.push(it);
+    return;
+  }
+  const n = type === 'nail' ? 6 : 1;
+  for (let i = 0; i < n; i++) {
+    const p = n > 1 ? at.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.3, 0, (Math.random() - 0.5) * 0.3)) : at;
+    construction.spawn(type, p, yaw + (n > 1 ? Math.random() * Math.PI : 0));
+  }
+}
+
 // ---- the spawn menu (baseplate only, ~): anything in the game, in front of you ----
 let spawning = false;
 const spawnMenu = (() => {
@@ -2560,6 +2616,7 @@ const spawnMenu = (() => {
     { name: 'Litter', items: Object.keys(LITTER).map((k) => ({ id: 'litter:' + k, label: nm(k) })) },
     { name: 'Medical', items: Object.keys(MED).map((k) => ({ id: 'med:' + k, label: MED[k].name + ' (×3)' })) },
     { name: 'Tools', items: [{ id: 'rope:3', label: 'Rope (×3)' }] },
+    { name: 'Construction', items: BUILD_ITEMS.map((b) => ({ id: 'build:' + b.id, label: b.name })) },
   ];
   /** A clear spot on the ground `dist` in front of the camera (nudged about if that's taken). */
   const spotAhead = (dist, r) => {
@@ -2610,6 +2667,7 @@ function spawnNpc(kind, prompt = '', sex = null) { return createSandboxNpc(kind,
     } else if (kind === 'nade') nades.lay(type, 3, spotAhead(1.3, 0.05));
     else if (kind === 'med') med.give(type, 3);
     else if (kind === 'rope') ropes.give(3);
+    else if (kind === 'build') spawnBuild(type, spotAhead(1.3, 0.1), yaw);
     else if (kind === 'cash') { const p = spotAhead(1.2, 0.05); money.spawn(p.setY(p.y + 0.3), +type); }
     sfx('pickup', 0.5);
   };
@@ -2631,7 +2689,9 @@ function spawnNpc(kind, prompt = '', sex = null) { return createSandboxNpc(kind,
 })();
 function openSpawn() {
   // (the spawn menu is the baseplate's; elsewhere only the admins get it, for their tools)
-  if (!spawnMenu || (levelName !== 'baseplate' && !amAdmin)) return;
+  if (!spawnMenu || (!BUILD_LEVELS.has(levelName) && !amAdmin)) return;
+  // (the room: only the construction section; construction: only in the room / on the baseplate)
+  spawnMenu.allow = (cat) => (cat === 'Construction' ? BUILD_LEVELS.has(levelName) : levelName !== 'room' || amAdmin);
   spawning = true;
   keys.clear();
   aiming = dragging = lmb = false;
@@ -2659,9 +2719,16 @@ function equipQuickWeapon(type) {
 function placeSandboxObject(type) {
   if (!hero.god) return;
   const sizes = { trash: [0.3, 0.93], hydrant: [0.15, 0.75], table: [0.1, 0.76], chair: [0.21, 0.45], mail: [0.26, 1.3] };
+  const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+  // something to cut (slicing/SliceTargets.js): a real body, not a prop
+  if (TARGETS[type]) {
+    const at = focusPos().clone().addScaledVector(forward, 1.6);
+    at.y = colliders.groundAt(at.x, at.z, at.y + 1.5);
+    placeTarget(slicePieces, type, at, camYaw);
+    return;
+  }
   const [radius, height] = sizes[type] || [];
   if (!radius) return;
-  const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const point = focusPos().clone().addScaledVector(forward, 2);
   point.y = colliders.groundAt(point.x, point.z, point.y + 1.5);
   const walk = { x: point.x, z: point.z, r: radius, top: point.y + height };
@@ -2819,8 +2886,30 @@ function vrEquip(type) {
     it.pickT = 1;
   }
 }
-const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, sfx, sun, grabber, nades, chunks: () => dismember.chunks,
+/** Back on your feet now, however hurt (out cold too: you come round) - every injury stays as it is. */
+function standUp() {
+  if (hero.mode !== 'ragdoll' || hero.brain.dead || hero.seat) return;
+  const O = hero.organs;
+  if (O) { O.state.out = false; O.wakeT = undefined; O.apply(); }
+  hero.getUp(false);
+}
+const doorHint = new DoorHint(scene);
+const dash = new Dash();
+const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, sfx, sun, grabber, nades, chunks: grabChunks,
   resetWorld: () => resetWorld(),
+  // cars: squeeze on a door handle to get in (vrdrive.js)
+  doorNear: (p, reach = 0.55) => (hero.mode === 'anim' && !hero.hero.action?.isClimb ? vehicles.doorNear(p, reach) : null),
+  enterCar: (door) => {
+    const si = mp.live ? mp.seatFor(door.car) : 0;
+    if (si < 0) return false;
+    fists.cancel();
+    if (me.convo) me.convo.end(true);
+    vehicles.enter(hero, door.car, si);
+    mp.entered(door.car);
+    return true;
+  },
+  exitCar: () => { if (hero.seat) vehicles.exit(hero); },
+  standUp,
   // a headset draws everything twice at 72fps+: no shadow pass (a third draw of the world), and
   // nothing past 80 m (it's in the fog anyway)
   onEnter: () => {
@@ -2854,19 +2943,25 @@ const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, s
 // (no spawning in the main menu: vr.noSpawn)
 vr.noSpawn = IN_MENU;
 vr.spawner = new VRSpawn(vr, {
-  kinds: [
-    { id: 'dummy-ai', name: 'Passive', tint: '#6fcf7f' },
-    { id: 'dummy', name: 'Dummy', tint: '#9aa0a8' },
+  sections: () => [
+    { title: 'People', items: [
+      { id: 'dummy-ai', name: 'Passive', tint: '#6fcf7f' },
+      { id: 'dummy', name: 'Dummy', tint: '#9aa0a8' },
+    ] },
+    ...(BUILD_LEVELS.has(levelName) ? [{ title: 'Construction', items: BUILD_ITEMS.map((b) => ({ id: 'build:' + b.id, name: b.name.replace(' (×6)', ''), tint: '#c4935c' })) }] : []),
   ],
   groundAt: (x, z, y) => colliders.groundAt(x, z, y),
-  spawn: (kind, at) => createSandboxNpc(kind, '', Math.random() < 0.5 ? 'f' : 'm', at),
+  spawn: (kind, at) => {
+    if (kind.startsWith('build:')) spawnBuild(kind.slice(6), at, vr.rigYaw || 0);
+    else createSandboxNpc(kind, '', Math.random() < 0.5 ? 'f' : 'm', at);
+  },
 });
 
 // ---- the main menu room: one dummy, and the map board on the wall ----
 
 // ---- switching maps in place (no reload: a VR session carries straight on), behind a loading screen ----
 const loading = new Loading(camera);
-const MAP_NAMES = { menu: 'Menu', baseplate: 'Baseplate', room: 'Room' };
+const MAP_NAMES = { menu: 'Menu', baseplate: 'Baseplate', room: 'Room', racetrack: 'Racetrack' };
 let switchingLevel = false;
 async function switchLevel(name) {
   if (switchingLevel || !LEVELS[name] || name === levelName) return;
@@ -2910,6 +3005,20 @@ function disposeTree(o) {
     for (const m of Array.isArray(x.material) ? x.material : x.material ? [x.material] : []) { m.map?.dispose?.(); m.dispose?.(); }
   });
 }
+// ---- full bright, always: every light off, one flat white ambient that shows each surface's
+// own colour. Re-applied after every map load (a new map brings its own sky lights and turns
+// the sun back on).
+var flatLight; // (var: applyFullbright runs before this line, in the settings block)
+function applyFullbright() {
+  flatLight ||= new THREE.AmbientLight(0xffffff, Math.PI);
+  if (flatLight.parent !== scene) scene.add(flatLight);
+  scene.traverse((o) => { if (o.isLight && o !== flatLight) o.intensity = 0; });
+  scene.environment = null;
+  if (renderer.toneMapping !== THREE.NoToneMapping) {
+    renderer.toneMapping = THREE.NoToneMapping;
+    scene.traverse((o) => { const m = o.material; if (m) for (const x of Array.isArray(m) ? m : [m]) x.needsUpdate = true; });
+  }
+}
 function loadLevel(name) {
   // everyone and everything of the old map goes
   for (const n of [...npcs]) dropNpc(n);
@@ -2919,6 +3028,10 @@ function loadLevel(name) {
   for (const o of levelObjs) { o.removeFromParent(); disposeTree(o); }
   if (menuBoard) { menuBoard.mesh.visible = false; menuBoard.laser.visible = false; }
   if (booth) booth.visible = false;
+  stashLevelCars(levelName);
+  level.dispose?.();
+  grabber.release(); vr.letGo?.('left'); vr.letGo?.('right');
+  construction.clear();
   // the new one
   const before = new Set(scene.children);
   const L = LEVELS[name](scene, renderer);
@@ -2940,6 +3053,7 @@ function loadLevel(name) {
   if (vrWas) { vrWas.far = camera.far; }
   camera.updateProjectionMatrix();
   level = L;
+  parkLevelCars(name, L);
   levelName = name;
   IN_MENU = name === 'menu';
   SPAWN.copy(L.spawn);
@@ -2983,8 +3097,9 @@ function loadLevel(name) {
   }
   // and a clean start in it
   resetWorld(false);
+  applyFullbright();
 }
-const MAP_BOARD = [{ id: 'baseplate', name: 'Baseplate' }, { id: 'room', name: 'Room' }];
+const MAP_BOARD = [{ id: 'baseplate', name: 'Baseplate' }, { id: 'room', name: 'Room' }, { id: 'racetrack', name: 'Racetrack' }];
 let menuBoard = level.menuBoard ? new MenuBoard(scene, level.menuBoard, MAP_BOARD, goMap) : null;
 // the dressing booth by it: every pick worn at once, saved and shown to everyone
 const makeBooth = (spot) => new DressingBooth(scene, spot, () => hero.hero, () => {
@@ -3018,7 +3133,7 @@ menuDummy();
 
 const selfHud = new SelfHud({
   hero, canvas, mobile, hitSelf,
-  standUp: () => { if (hero.mode === 'ragdoll' && !hero.brain.dead) hero.toggleRagdoll(); },
+  standUp,
 });
 let frameNo = 0;
 let cashRewardTimer = 0;
@@ -3091,6 +3206,8 @@ function frame() {
   grabber.update(dt);
   tugged.update(dt);
   // (admin.js) god mode: nothing wears you down; noclip: flying, through anything
+  // (invincible: wounds, bleeding and broken bones as ever - just never fatal: organs.js die() won't)
+  if (hero.invincible && hero.organs && !hero.brain.dead) { const O = hero.organs; O.blood = Math.max(O.blood, 0.32); O.state.dieT = -1; }
   if (hero.god) { hero.burnT = 0; if (hero.organs && !hero.brain.dead) { hero.organs.blood = 1; hero.organs.state.pain = 0; } }
   {
     if (wingFlying && (hero.mode !== 'anim' || hero.seat || hero.brain.dead || !hero.hero.look?.wingFlight)) wingFlying = false;
@@ -3162,6 +3279,10 @@ function frame() {
   litter.update(dt);
   throws.update(dt);
   dismember.update(dt);
+  construction.update(dt);
+  slicePieces.update(dt);
+  sliceFx.update(dt);
+  sliceDebug.update(dt);
   if (level.spotIn) litter.stream(focusPos(), level.spotIn, groundAt);
   shots.update(dt);
   // deaths, as they happen (anyone: people, you, other players)
@@ -3202,6 +3323,13 @@ function frame() {
   wanted.update(dt);
   store?.update(hero.hero.pos, hero.mode === 'anim' && !hero.seat, money.amount);
   carPrompt();
+  dash.update(hero.seat?.driver ? hero.seat.car : null);
+  // the door you can get in by, lit up
+  if (vr.on) doorHint.update(vr.drive.hint);
+  else {
+    const door = !hero.seat && hero.mode === 'anim' && !hero.brain.dead ? vehicles.doorNear(hero.hero.pos) : null;
+    doorHint.update(door ? { ...door, ready: true } : null);
+  }
   mp.post(dt);
   const car = hero.seat?.car;
   const p = car ? car.p : hero.focus();

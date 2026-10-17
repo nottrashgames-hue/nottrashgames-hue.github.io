@@ -45,7 +45,7 @@ export class SpawnMenu {
         b.textContent = it.label;
         b.addEventListener('click', () => onPick(it.id));
         grid.appendChild(b);
-        this.buttons.push({ b, text: (it.label + ' ' + c.name).toLowerCase(), h, grid });
+        this.buttons.push({ b, text: (it.label + ' ' + c.name).toLowerCase(), h, grid, cat: c.name });
       }
       list.append(h, grid);
     }
@@ -75,10 +75,11 @@ export class SpawnMenu {
     const q = this.search.value.trim().toLowerCase();
     const shown = new Set();
     for (const x of this.buttons) {
-      const on = !q || x.text.includes(q);
+      const on = (!this.allow || this.allow(x.cat)) && (!q || x.text.includes(q));
       x.b.style.display = on ? '' : 'none';
       if (on) shown.add(x.grid);
     }
+    for (const x of this.buttons) if (!shown.has(x.grid)) x.b.style.display = 'none';
     for (const x of this.buttons) { x.h.style.display = x.grid.style.display = shown.has(x.grid) ? '' : 'none'; }
   }
   show() {

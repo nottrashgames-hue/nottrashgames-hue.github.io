@@ -7,11 +7,11 @@ import * as THREE from 'three';
 */
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
-const W = 640, H = 270, PAD = 24, BH = 78, GAP = 14;
+const W = 640, PAD = 24, BH = 78, GAP = 14, HEAD = 46;
 const _p = V(), _q = new THREE.Quaternion(), _s = V(), _d = V(), _v = V();
 
 export class VRSpawn {
-  /** ctx: { kinds: [{ id, name }], spawn(kind, pos), groundAt(x, z, y) } */
+  /** ctx: { sections: () => [{ title, items: [{ id, name, tint }] }], spawn(kind, pos), groundAt(x, z, y) } */
   constructor(vr, ctx) {
     this.vr = vr;
     Object.assign(this, ctx);
@@ -22,6 +22,22 @@ export class VRSpawn {
   get open() { return !!this.mesh?.visible; }
 
   build() {
+    // (the sections: laid out first, the panel as tall as they need)
+    const col = (W - PAD * 2 - GAP * 2) / 3;
+    this.buttons = [];
+    this.heads = [];
+    let y = 64;
+    for (const S of this.sections()) {
+      this.heads.push({ title: S.title, y: y + HEAD / 2 - 6 });
+      y += HEAD;
+      S.items.forEach((it, i) => this.buttons.push({ ...it, x: PAD + (i % 3) * (col + GAP), y: y + Math.floor(i / 3) * (BH + GAP), w: col, h: BH }));
+      y += Math.ceil(S.items.length / 3) * (BH + GAP) + 6;
+    }
+    const H = (this.H = Math.round(y + PAD - GAP));
+    if (this.mesh) {
+      this.mesh.removeFromParent(); this.mesh.geometry.dispose(); this.mesh.material.dispose(); this.tex.dispose();
+      this.laser.removeFromParent(); this.marker.removeFromParent();
+    }
     const c = document.createElement('canvas');
     c.width = W; c.height = H;
     const tex = new THREE.CanvasTexture(c);
@@ -43,16 +59,13 @@ export class VRSpawn {
     this.vr.rig.add(this.mesh, this.laser);
     this.vr.scene.add(this.marker);
     this.rc = new THREE.Raycaster();
-    // the buttons, in canvas pixels
-    const col = (W - PAD * 2 - GAP * 2) / 3;
-    const grid = (list, y0, kind) => list.map((it, i) => ({ ...it, kind, x: PAD + (i % 3) * (col + GAP), y: y0 + Math.floor(i / 3) * (BH + GAP), w: col, h: BH }));
-    this.buttons = grid(this.kinds, 64, 'npc');
   }
 
   draw(hover) {
     const key = hover + '|' + this.kind;
     if (this.drawn === key) return;
     this.drawn = key;
+    const H = this.H;
     const g = this.c.getContext('2d');
     g.clearRect(0, 0, W, H);
     g.fillStyle = 'rgba(18,18,22,0.88)';
@@ -61,6 +74,9 @@ export class VRSpawn {
     g.font = 'bold 28px system-ui, sans-serif';
     g.textAlign = 'left'; g.textBaseline = 'middle';
     g.fillText(this.kind ? 'Point at the ground, pull trigger' : 'Spawn', PAD + 4, 34);
+    g.font = 'bold 22px system-ui, sans-serif';
+    g.fillStyle = 'rgba(255,214,90,0.8)';
+    for (const S of this.heads) g.fillText(S.title.toUpperCase(), PAD + 4, S.y);
     this.buttons.forEach((b, i) => {
       const on = b.id === this.kind;
       g.fillStyle = i === hover ? '#ffd65a' : on ? 'rgba(255,214,90,0.35)' : 'rgba(255,255,255,0.1)';
@@ -76,7 +92,9 @@ export class VRSpawn {
 
   toggle() { if (this.open) this.close(); else this.show(); }
   show() {
-    if (!this.mesh) this.build();
+    // (what's on offer can change with the map: rebuilt when it has)
+    const sig = JSON.stringify(this.sections().map((S) => [S.title, S.items.map((x) => x.id)]));
+    if (!this.mesh || sig !== this.sig) { this.sig = sig; this.build(); }
     const vr = this.vr, cam = vr.camera, M = this.mesh;
     // in front of you, off to the left: the right hand is free to point past it at the ground
     _d.set(0, 0, -1).applyQuaternion(cam.quaternion).setY(0);
@@ -135,7 +153,7 @@ export class VRSpawn {
     this.marker.visible = false;
     if (hit) {
       dist = hit.distance;
-      const px = hit.uv.x * W, py = (1 - hit.uv.y) * H;
+      const px = hit.uv.x * W, py = (1 - hit.uv.y) * this.H;
       hover = this.buttons.findIndex((b) => px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h);
       if (hover !== this.hover) { this.hover = hover; if (hover >= 0) vr.buzz(hand, 0.15, 20); }
       if (click && hover >= 0) {
