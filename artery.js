@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { settings, bloodCount } from './settings.js';
+import { inkOf, noInk } from './inks.js';
 
 /*
   Arterial bleeding: a cut artery (a stump, a round through the femoral, the carotid, the
@@ -12,6 +13,7 @@ import { settings, bloodCount } from './settings.js';
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const rnd = (a, b) => a + Math.random() * (b - a);
 const MAX = 24;
+const RATE = 45; // stream points per second, per jet (bloodstream.js joins them into one rope)
 
 export class Arteries {
   constructor(blood) {
@@ -25,7 +27,7 @@ export class Arteries {
    * before it closes up on its own.
    */
   add(actor, obj, lp, ln, k = 1, clot = 45) {
-    if (this.list.length >= MAX) this.list.shift();
+    if (this.list.length >= MAX) this.end(this.list.shift());
     this.list.push({ actor, obj, lp: lp.clone(), ln: ln.clone().normalize(), k, clot, t: 0, ph: Math.random(), deadT: 0 });
   }
 
@@ -38,7 +40,9 @@ export class Arteries {
     this.add(actor, obj, w.local, n, k, rnd(35, 60));
   }
 
-  clearActor(a) { this.list = this.list.filter((j) => j.actor !== a); }
+  /** A jet gone: its stream stops, what's in the air still falls. */
+  end(j) { if (j?.stream) { this.blood?.streams?.close(j.stream); j.stream = null; } }
+  clearActor(a) { this.list = this.list.filter((j) => (j.actor !== a ? true : (this.end(j), false))); }
   clear() { this.list.length = 0; }
 
   update(dt) {
@@ -49,13 +53,13 @@ export class Arteries {
       // (gone with the body: a respawn heals it)
       // (a puppet's blood isn't ours to know: assume it's run a while)
       const vol = A.remote || !O ? 0.8 : O.blood;
-      if (!A.hero.root.parent || vol > (j.vol ?? vol) + 0.15) { this.list.splice(i, 1); continue; }
+      if (!A.hero.root.parent || vol > (j.vol ?? vol) + 0.15) { this.end(j); this.list.splice(i, 1); continue; }
       j.vol = vol;
       const dead = A.brain.dead;
       if (dead) j.deadT += dt;
       // pressure: what's left in the body, closing off as it clots, gone once the heart stops
       const press = Math.max(0, (vol - 0.28) / 0.72) * Math.exp(-j.t / j.clot) * (dead ? Math.exp(-j.deadT / 0.9) : 1);
-      if (press < 0.04) { this.list.splice(i, 1); continue; }
+      if (press < 0.04) { this.end(j); this.list.splice(i, 1); continue; }
       // the heart races as the blood runs out
       const hz = 1.25 + Math.max(0, 1 - vol) * 2.6;
       j.ph += dt * hz;
@@ -64,31 +68,37 @@ export class Arteries {
       const beat = ph < 0.22 ? Math.sin((ph / 0.22) * Math.PI) : 0.12;
       const k = j.k * press;
       if (!A.remote && O && !dead && !A.wounds?.dry) O.blood -= dt * 0.006 * k * (0.4 + beat);
-      if (!B || !settings.blood || !settings.spurts) continue;
+      if (!B || !settings.blood || !settings.spurts || !settings.bloodSpray || !(settings.bloodAmount > 0)) { this.end(j); continue; }
       j.obj.updateWorldMatrix(true, false);
       const p = j.obj.localToWorld(_p.copy(j.lp));
       const d = _d.copy(j.ln).transformDirection(j.obj.matrixWorld);
-      // the stream: a steady, tight run of heavy drops along one arc - surging out far on each
-      // beat, sagging back between - so it reads as a single rope of blood that rains down and
-      // pools where it lands
-      const surge = 0.35 + 0.65 * beat;
+      // the stream: one smooth rope of blood along an arc - surging out far on each beat,
+      // sagging back between - drawn as a single ribbon (bloodstream.js), so it costs a handful
+      // of light points a second instead of a hail of drops; it pools where it lands
       const speed = (1.1 + 3.4 * beat) * Math.min(1.4, 0.55 + 0.45 * k);
-      j.acc = (j.acc || 0) + dt * (60 + 110 * beat) * Math.min(1.4, k) * surge;
-      let m = bloodCount(Math.floor(j.acc));
-      j.acc -= Math.floor(j.acc);
       // (the body's own motion carries the stream with it)
       const pw = j.obj.getWorldPosition(_w);
       const mv = j.last ? _v.subVectors(pw, j.last).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 6) : _v.set(0, 0, 0);
       (j.last ||= V()).copy(pw);
-      for (; m > 0; m--) {
-        // (a sliver of wobble, so it isn't a laser - the stream twists a little as it goes)
-        const wob = 0.035 + 0.04 * (1 - beat);
-        _q.copy(d);
-        _q.x += rnd(-wob, wob); _q.y += rnd(-wob, wob) * 0.6; _q.z += rnd(-wob, wob);
-        _q.normalize().multiplyScalar(speed * rnd(0.93, 1.05)).add(mv);
-        // (emitted a little way along the jet: one frame's drops strung out, no clumps)
-        _s.copy(p).addScaledVector(_q, rnd(0, dt));
-        B.inked(A).drip(_s, _q, rnd(0.006, 0.0085) * Math.min(1.25, 0.8 + 0.3 * k));
+      const S = B.streams;
+      if (S) {
+        const ink = inkOf(A);
+        if (!noInk(ink)) {
+          if (!j.stream) j.stream = S.open(A, ink);
+          j.acc = (j.acc || 0) + dt * RATE;
+          const w = 0.0042 * Math.min(1.35, 0.7 + 0.3 * k) * (0.7 + 0.45 * beat) * Math.sqrt(Math.min(1, press + 0.25));
+          while (j.acc >= 1) {
+            j.acc -= 1;
+            // (a sliver of twist, so it isn't a laser)
+            const wob = 0.012 + 0.014 * (1 - beat);
+            _q.copy(d);
+            _q.x += rnd(-wob, wob); _q.y += rnd(-wob, wob) * 0.6; _q.z += rnd(-wob, wob);
+            _q.normalize().multiplyScalar(speed).add(mv);
+            // (each one where it would be by now: the rope evenly strung out whatever the frame rate)
+            _s.copy(p).addScaledVector(_q, j.acc / RATE);
+            S.emit(j.stream, _s, _q, w);
+          }
+        }
       }
       // and a spit of fine spray off it as each beat hits
       if (beat > 0.6 && !j.spat) { j.spat = true; B.inked(A).spray(p, d, speed * 0.9, bloodCount(4), 0.18, rnd(0.9, 1.3)); }

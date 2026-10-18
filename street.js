@@ -24,7 +24,7 @@ const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const HIDE = V(0, -60, 0);
 
 // how close a weapon has to be to land
-const REACH = { fists: 0.72, bat: 0.95, crowbar: 0.82, machete: 0.85 };
+const REACH = { fists: 0.72, bat: 0.95, crowbar: 0.82, machete: 0.85, longsword: 1.05, spear: 1.2, sledge: 0.95, fireaxe: 1, hatchet: 0.78, hammer: 0.72, knife: 0.7, pencil: 0.65, ruler: 0.8 };
 
 export class Street {
   /**
@@ -84,7 +84,7 @@ export class Street {
   provoked(by, how) {
     const A = this.A, P = this.P;
     if (A.brain.dead || by === A) return;
-    if (this.zombie) return; // (survival.js picks who they go for)
+    if (this.zombie || this.arena) return; // (survival.js / arena.js pick who they go for)
     if (by && !by.brain) by = null; // a driverless car
     const npc = this.npc;
     // the police don't take it: whoever did it is nicked
@@ -374,7 +374,7 @@ export class Street {
     const dist = flat(h.pos, tp);
     // they drove off / got away / we're hurting: forget it
     // (police don't give up: the wanted level decides when they're off the case)
-    if (!this.zombie && ((!this.cop && (dist > 30 || this.t > 45)) || (A.brain.shots && P.tough < 0.8) || (A.organs?.weak || 0) > 0.5)) {
+    if (!this.zombie && !this.arena && ((!this.cop && (dist > 30 || this.t > 45)) || (A.brain.shots && P.tough < 0.8) || (A.organs?.weak || 0) > 0.5)) {
       if (A.brain.shots) { this.npc.fearT = rnd(6, 10); this.npc.fleeFrom = tp.clone(); this.say('scared', null, 'scared', true); }
       this.stop();
       return null;

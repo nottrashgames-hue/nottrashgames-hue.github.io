@@ -1,6 +1,6 @@
 import { settings } from './settings.js';
 import * as THREE from 'three';
-import { INKS, inkOf, inkMat, shade } from './inks.js';
+import { INKS, inkOf, inkMat, shade, noInk } from './inks.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { groups, G_WORLD, G_CAR, G_DEBRIS, G_BODY } from './physics.js';
 import { DIM } from './character.js';
@@ -718,9 +718,10 @@ function section(loops, T, anat = null, ink = 0) {
   for (const r of rings) for (let i = 0; i < r.P2.length; i++) segs.push(r.P2[i], r.P2[(i + 1) % r.P2.length]);
   const edgeDist = edgeField(segs, 0.03);
 
-  // the fill: an even lattice (~1800 points on a torso, finer on a limb), else ear-clipped
+  // the fill: an even lattice (~700 points on a torso, finer on a limb), else ear-clipped
   const area = rings.reduce((s, r) => s + r.a, 0);
-  const h = clamp(Math.sqrt(area / 1800), 0.0035, 0.01);
+  // (~700 points: still even enough for the tear and the organs, at a fraction of the cost)
+  const h = clamp(Math.sqrt(area / 700), 0.005, 0.013);
   const F = latticeFace(rings, h, from2, onFace, edgeDist) || earFace(rings, T, onFace);
   if (!F || !F.tris.length) return null;
   const { fin, xy, isB } = F;
@@ -794,12 +795,21 @@ function section(loops, T, anat = null, ink = 0) {
     }
   }
   const STY = TUBE(PAL);
+  // (normals worked out once: the other side's are the same, turned round)
+  let NF = null;
   return (facing) => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', P);
     g.setAttribute('color', CA);
     g.setIndex(facing > 0 ? idx : idx.map((v, i) => idx[i - (i % 3) + [0, 2, 1][i % 3]]));
-    g.computeVertexNormals();
+    if (!NF) {
+      const t = new THREE.BufferGeometry();
+      t.setAttribute('position', P); t.setIndex(idx);
+      t.computeVertexNormals();
+      NF = t.attributes.normal.array;
+    }
+    const nr = facing > 0 ? NF.slice() : NF.map((x) => -x);
+    g.setAttribute('normal', new THREE.BufferAttribute(nr, 3));
     g.computeBoundingSphere();
     const out = [new THREE.Mesh(g, SECTION)];
     if (xs.length) {
@@ -1698,6 +1708,7 @@ export class Dismember {
   drop(c) {
     const i = this.chunks.indexOf(c);
     if (i >= 0) this.chunks.splice(i, 1);
+    if (c.stream) { this.ctx.blood?.streams?.close(c.stream); c.stream = null; }
     this.ctx.world.removeRigidBody(c.body);
     c.group.removeFromParent();
   }
@@ -1750,12 +1761,21 @@ export class Dismember {
       c.group.position.set(t.x, t.y, t.z);
       c.group.quaternion.set(r.x, r.y, r.z, r.w);
       c.group.updateMatrixWorld(true);
-      if (B && c.t < 2.2 && Math.random() < 0.6) {
+      // the cut end pours: a smooth stream (bloodstream.js) that weakens and stops
+      if (B?.streams && c.t < 2.2 && settings.blood && settings.bloodSpray && !(c.actor && noInk(inkOf(c.actor)))) {
         _q.set(r.x, r.y, r.z, r.w);
         const p = c.face.p.clone().applyQuaternion(_q).add(_p.set(t.x, t.y, t.z));
         const d = c.face.n.clone().applyQuaternion(_q);
-        B.inked(c.actor).spray(p, d, 1.6 * (1 - c.t / 2.2) + 0.3, 1, 0.5, 0.8);
-      }
+        const lv = c.body.linvel(), k = 1 - c.t / 2.2;
+        c.stream ||= B.streams.open(c.actor, c.actor ? inkOf(c.actor) : 0);
+        c.sAcc = (c.sAcc || 0) + dt * 35;
+        while (c.sAcc >= 1) {
+          c.sAcc -= 1;
+          const v = d.clone().multiplyScalar(1.4 * k + 0.3).add(_s.set(lv.x, lv.y, lv.z));
+          v.x += rnd(-0.08, 0.08); v.z += rnd(-0.08, 0.08);
+          B.streams.emit(c.stream, p.clone().addScaledVector(v, c.sAcc / 35), v, 0.0035 * (0.45 + 0.55 * k));
+        }
+      } else if (c.stream) { B?.streams?.close(c.stream); c.stream = null; }
     }
     for (let i = this.spurts.length - 1; i >= 0; i--) {
       const s = this.spurts[i];

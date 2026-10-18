@@ -6,6 +6,7 @@ import { Organs } from './organs.js';
 import { dropHitsCar } from './carstain.js';
 import { INKS, inkOf, shade, noInk, isVomit, RAINBOW, PRISM, GALAXY, prismHue, prismRGB, setPrismHue } from './inks.js';
 import { Arteries } from './artery.js';
+import { BloodStreams } from './bloodstream.js';
 import { capsuleOf } from './strike.js';
 
 /*
@@ -96,6 +97,8 @@ export class BloodSystem {
     this.colliders = colliders;
     this.floor = new BloodSurfaces(scene, colliders);
     this.arteries = new Arteries(this);
+    // an artery's jet: one smooth rope of blood (bloodstream.js), not a hail of drops
+    this.streams = new BloodStreams(this, scene, (ink) => dropCol(ink) || DROP[ink] || DROP[0]);
     this.people = [];
     // drops in the air: flat 2D sprites (one point each, a round drop with a glint) - no geometry,
     // no lighting, one draw for all of them
@@ -248,6 +251,7 @@ export class BloodSystem {
     this.mesh.visible = false;
     this.floor.clear();
     this.arteries.clear();
+    this.streams.clear();
   }
 
   update(dt) {
@@ -255,6 +259,7 @@ export class BloodSystem {
     for (const w of this.people) w.update(dt, budget);
     for (const w of this.people) w.actor.organs.update(dt);
     this.arteries.update(dt);
+    this.streams.update(dt);
     const P = this.p, cols = this.colliders;
     this.bodyCaps(P);
     // only the cars near the drops in the air get tested

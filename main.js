@@ -44,7 +44,8 @@ import { SliceDebug } from './slicing/SliceDebug.js';
 import { TARGETS, placeTarget } from './slicing/SliceTargets.js';
 import { Kick } from './kick.js';
 import { engineLoop } from './sfx.js';
-import { Multiplayer } from './mp.js';
+import { Session } from './multiplayer/session.js';
+import { VoiceChat } from './multiplayer/voice.js';
 import { loadProfile, saveProfile, localLook, localLookTime } from './profile.js';
 import { Wardrobe, sanitizeLook } from './wardrobe.js';
 import { specialLook, specialSkins, SPECIAL_NAMES, BALDI, wearSpecial } from './special.js';
@@ -56,14 +57,13 @@ import { setVolume, setBusVolume } from './sfx.js';
 import { Wanted } from './wanted.js';
 import { Police, copLook, capMesh } from './police.js';
 import { buildTower } from './tower.js';
-import { buildArena, buildObby, buildMenuRoom, buildRoom } from './sandbox-maps.js';
+import { buildArena, buildObby, buildMenuRoom, buildMainMenu, buildRoom } from './sandbox-maps.js';
 import { buildRacetrack } from './racetrack.js';
 import { MenuBoard } from './mainmenu.js';
 import { DressingBooth } from './booth.js';
 import { Loading } from './loading.js';
 import { SandboxMenu } from './sandbox-menu.js';
 import { SpawnMenu } from './spawn.js';
-import { LobbyMenu, takeLobbyPick, pickThenGo, inviteToast } from './lobby.js';
 import { ORGAN_FX } from './organs.js';
 import { Hearts } from './hearts.js';
 import { showAnnounce } from './announce.js';
@@ -76,6 +76,8 @@ import { CarDamage } from './carfire.js';
 import { painLine } from './lines.js';
 import { SPECS as CAR_SPECS } from './carmodel.js';
 import { Survival, HIDE as SV_HIDE } from './survival.js';
+import { Arena } from './arena.js';
+import { MpArena } from './mparena.js';
 import { zombieLook, makeZombie } from './zombie.js';
 import { SvShop } from './svshop.js';
 import { dentEars, undentTree } from './dent.js';
@@ -132,10 +134,15 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 400);
 // levels: picked from ?level=, else the last one played
 // (a fresh visit starts in the main menu room; a map is picked from its wall)
-const LEVELS = { menu: buildMenuRoom, baseplate: buildBaseplate, room: buildRoom, racetrack: buildRacetrack };
-let levelName = new URLSearchParams(location.search).get('level') || 'menu';
-if (!LEVELS[levelName]) levelName = 'menu';
-let IN_MENU = levelName === 'menu';
+const LEVELS = { start: buildMainMenu, menu: buildMenuRoom, baseplate: buildBaseplate, room: buildRoom, racetrack: buildRacetrack, arena: buildArena, mparena: (s, r) => buildArena(s, r, { mp: true }) };
+// (a fresh visit starts in the main menu: Sandbox or Multiplayer Arena)
+let levelName = new URLSearchParams(location.search).get('level') || 'start';
+if (!LEVELS[levelName]) levelName = 'start';
+// the two menu places: no spawning, no litter, the board's the way on
+const isMenu = (n) => n === 'menu' || n === 'start';
+/** Where "Back" goes: sandbox maps -> the sandbox's menu room -> the main menu. */
+const backOf = (n) => (n === 'start' ? null : n === 'menu' || n === 'mparena' ? 'start' : 'menu');
+let IN_MENU = isMenu(levelName);
 // (switching maps happens in place, behind a loading screen: no reload, so VR carries on - switchLevel)
 function goMap(m) { switchLevel(m); }
 let level = LEVELS[levelName](scene, renderer);
@@ -721,17 +728,29 @@ const melees = (FREE_WEAPONS ? [
 });
 // everyone starts with a hunting knife in hand (the same one handed back on every respawn,
 // unless somebody else has picked it up)
-let starterKnife = null, knifeDue = false;
+let starterKnife = null, knifeDue = false, starterType = 'knife';
 // (handed over once you're on your feet: a body still falling or getting up would drop it)
-function giveKnife() { knifeDue = true; }
+// the multiplayer arena: a random melee weapon every life (the last one goes - nobody hoards them)
+const ARENA_MELEE = () => Object.keys(WEAPONS).filter((k) => k !== 'saw');
+function giveKnife() {
+  knifeDue = true;
+  if (!level.mpArena) { starterType = 'knife'; return; }
+  const all = ARENA_MELEE().filter((k) => k !== starterType);
+  starterType = all[Math.floor(Math.random() * all.length)];
+}
 function knifeTick() {
   if (!knifeDue || hero.mode !== 'anim' || hero.brain.dead || hero.seat) return;
   knifeDue = false;
   if (hero.gunHeld || hero.meleeHeld || hero.meleeHeldL || carry.item) return;
   const k = starterKnife;
-  if (!k || (k.state === 'held' && k.owner !== hero) || k.state === 'remote' || !melees.includes(k)) {
+  if (k && k.type !== starterType && melees.includes(k) && !(k.state === 'held' && k.owner !== hero)) {
+    // (last life's weapon: gone, wherever it ended up)
+    k.dispose();
+    melees.splice(melees.indexOf(k), 1);
+  }
+  if (!k || k.type !== starterType || (k.state === 'held' && k.owner !== hero) || k.state === 'remote' || !melees.includes(k)) {
     const q = new THREE.Quaternion();
-    starterKnife = new Melee('knife', scene, debris, meleeCtx, { pos: hero.hero.pos.clone(), quat: q });
+    starterKnife = new Melee(starterType, scene, debris, meleeCtx, { pos: hero.hero.pos.clone(), quat: q });
     melees.push(starterKnife);
   }
   // (left lying where you died: it doesn't fly across the map back to you)
@@ -1007,7 +1026,7 @@ function scatterLitter() {
   }
   else if (level.npcSpot && !level.clean) litter.scatter(() => level.npcSpot(), groundAt, 75);
   // (the baseplate is left clean)
-  else if (levelName !== 'baseplate' && levelName !== 'room' && levelName !== 'racetrack' && !level.clean && !IN_MENU) litter.scatter(() => { const a = Math.random() * 6.283, r = 2 + Math.random() * 9; return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r); }, groundAt, 22);
+  else if (levelName !== 'baseplate' && levelName !== 'room' && levelName !== 'racetrack' && levelName !== 'arena' && !level.clean && !IN_MENU) litter.scatter(() => { const a = Math.random() * 6.283, r = 2 + Math.random() * 9; return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r); }, groundAt, 22);
 }
 scatterLitter();
 /**
@@ -1605,6 +1624,7 @@ function openMenu() {
   if (hero.meleeHeldL) hero.meleeHeldL.btn = null;
   swinging = null;
   menu.classList.add('on');
+  arenaMenuBtn.hidden = !arena?.ready;
   touch?.reset(); touch?.closeSheets();
   if (document.pointerLockElement) document.exitPointerLock();
 }
@@ -1618,7 +1638,7 @@ function closeMenu(lock = true) {
 const DEAD_WAIT = 1.2;
 let deadT = 0, deathStingPlayed = false;
 const deadEl = document.getElementById('dead');
-deadEl.addEventListener('click', () => { if (hero.brain.dead && !survival?.active) respawn(); });
+deadEl.addEventListener('click', () => { if (hero.brain.dead && !survival?.active && !arena?.active && !mpArena) respawn(); });
 function respawn(where = null) {
   if (me.convo) me.convo.end(true);
   fists.cancel();
@@ -1680,6 +1700,7 @@ function resetWorld(fresh = true) {
   if (mp.isHost) {
     for (const n of npcs) { n.reset(); n.cashDropped = false; }
     survival?.reset();
+    arena?.reset();
     for (const [i, c] of vehicles.cars.entries()) if (mp.carLocal(i)) c.reset();
     vehicles.clear();
     if (traffic) seatDrivers();
@@ -1718,8 +1739,8 @@ for (const b of document.querySelectorAll('#levels button')) {
 }
 {
   const back = document.getElementById('toMenu');
-  back.hidden = IN_MENU;
-  back.addEventListener('click', () => goMap('menu'));
+  back.hidden = !backOf(levelName);
+  back.addEventListener('click', () => { const b = backOf(levelName); if (b) goMap(b); });
 }
 menu.addEventListener('click', (e) => { if (e.target === menu) closeMenu(); });
 // Esc while the mouse is captured only releases it (no keydown): that opens the menu
@@ -1913,6 +1934,7 @@ addEventListener('keydown', (e) => {
   }
   if (paused) return;
   if (e.code === 'KeyR' && !e.repeat) { openSandbox(); e.preventDefault(); return; }
+  if (/^Digit[1-5]$/.test(e.code) && !e.repeat && level.mpArena) { e.preventDefault(); return; }
   if (/^Digit[1-5]$/.test(e.code) && !e.repeat) { sandboxMenu.useSlot(+e.code.slice(-1) - 1); e.preventDefault(); return; }
   if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat) { openChat(); e.preventDefault(); return; }
   keys.add(e.code);
@@ -2326,9 +2348,8 @@ function removeActor(a) {
   actors.splice(i, 1);
   for (const o of actors) { const l = othersOf.get(o), j = l.indexOf(a.state); if (j >= 0) l.splice(j, 1); }
 }
-const MP_KEY = 'multiplayer';
-let lobbyMenu = null;
-mp = new Multiplayer({
+// multiplayer: one seam (multiplayer/session.js) - single player until a networked Session replaces it (multiplayer/GUIDE.md)
+mp = new Session({
   scene, world, levelName, level, hero, npcs, vehicles, shots, props, bubbles, camera, sfx, blood,
   addActor, removeActor, guns, melees, debris, litter, carry, dismember, tugged, grabber, look: netLook,
   // someone else's weapon we hadn't got a copy of (they bought it, a street person drew it)
@@ -2378,6 +2399,10 @@ mp = new Multiplayer({
   onNade: (m, by) => nades.onNet(m, by),
   onHostChange: (host) => { if (host) streamer.update(0); },
 });
+// voice chat (multiplayer/voice.js): a stub until it's networked - open mic, or hold Y with the Push to talk setting
+const voice = new VoiceChat({ camera, mp, hero });
+addEventListener('keydown', (e) => { if (e.code === 'KeyY' && !e.repeat && !chatting) voice.talk(true); });
+addEventListener('keyup', (e) => { if (e.code === 'KeyY') voice.talk(false); });
 // things you throw fly on everyone's screen (only yours does any damage)
 carry.onSet = (n, old, v, spin) => { if (mp.live) mp.items.set(n, old, v, spin); };
 // the people's lines, heard by everyone
@@ -2399,50 +2424,6 @@ bubbles.say = (actor, text, opts) => {
   if (settings.voices) voices.say(actor, text, { tone: opts?.tone, player: actor === hero || !!actor.remote });
   return say(actor, text, opts);
 };
-const mpBtn = document.getElementById('mp');
-function mpButton() { mpBtn.classList.toggle('on', localStorage.getItem(MP_KEY) !== 'off'); }
-mpBtn.addEventListener('click', () => {
-  // switching off (or back on) starts the page afresh, alone or connected
-  localStorage.setItem(MP_KEY, localStorage.getItem(MP_KEY) === 'off' ? 'on' : 'off');
-  location.reload();
-});
-mpButton();
-// ---- lobbies (lobby.js, server.js): which lobby of this level we're in, and moving between them ----
-{
-  const lobbyBtn = document.getElementById('lobbyBtn'), lobbyEl = document.getElementById('lobbies');
-  const panes = [['setBtn', 'settings'], ['donate', 'donor']];
-  const lobbies = new LobbyMenu(lobbyEl, {
-    net: mp.net, map: levelName,
-    label: (m) => document.querySelector(`#levels button[data-level="${m}"]`)?.textContent || m,
-    online: () => localStorage.getItem(MP_KEY) !== 'off',
-    goLevel: (m) => goMap(m),
-  });
-  lobbyMenu = lobbies;
-  const shut = () => { lobbies.hide(); lobbyBtn.classList.remove('on'); };
-  lobbyBtn.addEventListener('click', () => {
-    if (lobbies.open) { shut(); document.getElementById('controls').hidden = false; return; }
-    // (one pane at a time on the right: the others close)
-    for (const [b, p] of panes) { document.getElementById(p).hidden = true; document.getElementById(b).classList.remove('on'); }
-    document.getElementById('controls').hidden = true;
-    lobbyBtn.classList.add('on');
-    lobbies.show();
-  });
-  for (const [b] of panes) document.getElementById(b).addEventListener('click', () => { if (lobbies.open) shut(); });
-  // (closing the menu stops the refreshing; it's shut next time it opens)
-  menu.addEventListener('transitionend', () => { if (!menu.classList.contains('on') && lobbies.open) { shut(); document.getElementById('controls').hidden = false; } });
-  // a lobby picked on another level, before the reload that brought us here
-  const pick = takeLobbyPick(levelName);
-  mp.net.wantLobby = pick.n;
-  mp.net.wantCode = pick.code;
-  // an invite from someone playing: Join takes us there (another level: a reload onto it)
-  const goLevel = (m) => goMap(m);
-  mp.net.on('invite', (m) => inviteToast(m, (x) => {
-    if (x.map !== levelName) { pickThenGo(x.map, x.lobby, x.code, goLevel); return; }
-    if (x.code) mp.net.goPrivate(x.code); else mp.net.swap(x.lobby);
-  }));
-}
-mp.net.on('announce', showAnnounce);
-if (localStorage.getItem(MP_KEY) !== 'off') mp.connect();
 giveKnife(); // (the starting weapon)
 // ---- survival (the tower): the start button on the helipad, waves of the dead, revives ----
 var survival = level.survival ? new Survival({
@@ -2458,6 +2439,87 @@ var survival = level.survival ? new Survival({
   onOver: () => { if (hero.brain.dead) respawn(); },
 }) : null;
 mp.g.onSurvival = (m) => survival?.onEvent(m);
+// ---- the arena: the spawn room's button, then waves of people in the pit (arena.js) ----
+/** One of the arena's fighters, in at a gate (no cap on how many: arena.js keeps it in hand). */
+function spawnFighter(weapon, p, yaw) {
+  p = p.clone(); p.y = colliders.groundAt(p.x, p.z, p.y + 1.5);
+  const actor = new Actor(scene, world, makeLook());
+  actor.hero.reset(p, yaw);
+  const npc = new Npc(actor, p.clone(), social);
+  npc.aiType = 'person';
+  npc.spawned = true;
+  npc.displayName = 'Fighter ' + (++npcLabelCount);
+  npc.chatAllowed = false;
+  hookNpc(actor, npc);
+  const persona = makePersona();
+  Object.assign(persona, { weapon, crook: false, temper: 1, tough: 0.7 });
+  npc.street = new Street(npc, persona, streetW);
+  setNpcDetectionSuppressed(npc, hero.god);
+  npcs.push(npc);
+  addActor(actor, true);
+  registerNpcLabel(npc);
+  npc.actor.onRemoteHit = (...args) => mp.forwardHit(npc.actor, ...args);
+  mp.npcIndex?.set(actor, npcs.length - 1);
+  return npc;
+}
+function removeFighter(n) {
+  const i = npcs.indexOf(n);
+  if (i >= 0) { dropNpc(n); npcs.splice(i, 1); }
+  // their weapon goes with them (unless you've taken it off them)
+  const k = n.street?.kit;
+  if (k && n.street.kit !== null && k.owner !== hero && melees.includes(k)) {
+    k.dispose();
+    melees.splice(melees.indexOf(k), 1);
+  }
+  if (n.street) n.street.kit = null;
+}
+// every melee weapon there is, for the arena's fighters (not the saw: it's sawing, not swinging)
+const ARENA_WEAPONS = Object.keys(WEAPONS).filter((k) => k !== 'saw');
+function makeArena(L) {
+  if (!L.arena) return null;
+  return new Arena({
+    scene, A: L.arena, hero, sfx, camera, vr: () => vr, weapons: ARENA_WEAPONS,
+    spawn: spawnFighter, remove: removeFighter,
+    teleport: (p, yaw) => {
+      p.y = colliders.groundAt(p.x, p.z, p.y + 1);
+      respawn(p);
+      hero.hero.yaw = yaw;
+      camYaw = yaw + Math.PI;
+    },
+    toRoom: () => respawn(),
+    onStart: () => closeMenu(),
+  });
+}
+var arena = makeArena(level);
+var mpArena = level.mpArena ? new MpArena({ hero, respawn: () => respawn() }) : null;
+/**
+ * What a map allows: in the multiplayer arena there's no resetting the world, no weapon wheel
+ * (VR) and no hotbar / spawning (desktop) - you fight with what you spawned with.
+ */
+function applyMode(L) {
+  const MPA = !!L.mpArena;
+  document.getElementById('reset').hidden = MPA;
+  vr.noReset = MPA;
+  vr.noWheel = MPA;
+  vr.noSpawn = IN_MENU || MPA;
+  if (MPA) vr.wheel && (vr.wheel.visible = false);
+}
+const arenaMenuBtn = document.getElementById('arenaGo');
+arenaMenuBtn.addEventListener('click', () => arena?.press());
+// the board on the spawn room wall: a click on it (crosshair), or a tap
+addEventListener('mousedown', (e) => {
+  if (!arena || mobile || e.button !== 0 || document.pointerLockElement !== canvas || paused || sandboxOpen) return;
+  if (arena.click()) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+{
+  let at = null;
+  canvas.addEventListener('pointerdown', (e) => { at = e.pointerType === 'touch' ? [e.clientX, e.clientY, performance.now()] : null; });
+  canvas.addEventListener('pointerup', (e) => {
+    if (!at || !arena || paused || sandboxOpen) return;
+    const [x, y, t] = at; at = null;
+    if (Math.hypot(e.clientX - x, e.clientY - y) < 14 && performance.now() - t < 350) arena.tap(camera, e.clientX, e.clientY);
+  });
+}
 
 // ---- cash everyone sees: the bounty on the dead, and bundles thrown to each other (J) ----
 let cashN = 0;
@@ -2737,7 +2799,7 @@ function placeSandboxObject(type) {
 }
 const sandboxMenu = new SandboxMenu({
   inMenu: IN_MENU,
-  onBack: () => goMap('menu'),
+  onBack: () => { const b = backOf(levelName); if (b) goMap(b); },
   onNpc: (kind, prompt, sex) => { if (IN_MENU) return; if (kind !== 'custom' || prompt) createSandboxNpc(kind, prompt, sex); },
   onMode: (mode) => {
     localStorage.setItem('playMode', mode);
@@ -2921,6 +2983,8 @@ const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, s
     }
     camera.far = Math.min(camera.far, 80);
     camera.updateProjectionMatrix();
+    // a headset always starts in the menu room: Sandbox or Multiplayer Arena, off its board
+    if (levelName !== 'start') setTimeout(() => goMap('start'), 0);
   },
   onExit: () => {
     hero.vrSelf = false;
@@ -2937,11 +3001,15 @@ const vr = new VRMode({ renderer, scene, camera, hero, actors, equip: vrEquip, s
   clearBlood: () => clearBlood(),
   // Calibrate height: the body rebuilt at this height (a body's proportions take a fresh build: the page reloads, back into the headset)
   resize: (h) => { const L = myLook(); L.height = h; saveProfile(money.amount, sanitizeLook(L)); location.reload(); },
-  backToMenu: IN_MENU ? null : () => goMap('menu'),
+  backToMenu: backOf(levelName) ? () => goMap(backOf(levelName)) : null,
   soft: !!level.soft,
 });
+// the arena's Start, in the headset's menu too
+vr.canStartRound = () => !!arena?.ready;
+vr.startRound = () => arena?.press();
 // (no spawning in the main menu: vr.noSpawn)
 vr.noSpawn = IN_MENU;
+applyMode(level);
 vr.spawner = new VRSpawn(vr, {
   sections: () => [
     { title: 'People', items: [
@@ -2961,7 +3029,7 @@ vr.spawner = new VRSpawn(vr, {
 
 // ---- switching maps in place (no reload: a VR session carries straight on), behind a loading screen ----
 const loading = new Loading(camera);
-const MAP_NAMES = { menu: 'Menu', baseplate: 'Baseplate', room: 'Room', racetrack: 'Racetrack' };
+const MAP_NAMES = { start: 'Main Menu', menu: 'Menu', baseplate: 'Baseplate', room: 'Room', racetrack: 'Racetrack', arena: 'Arena', mparena: 'Multiplayer Arena' };
 let switchingLevel = false;
 async function switchLevel(name) {
   if (switchingLevel || !LEVELS[name] || name === levelName) return;
@@ -3030,6 +3098,8 @@ function loadLevel(name) {
   if (booth) booth.visible = false;
   stashLevelCars(levelName);
   level.dispose?.();
+  arena?.dispose(); arena = null;
+  mpArena?.dispose(); mpArena = null;
   grabber.release(); vr.letGo?.('left'); vr.letGo?.('right');
   construction.clear();
   // the new one
@@ -3055,7 +3125,7 @@ function loadLevel(name) {
   level = L;
   parkLevelCars(name, L);
   levelName = name;
-  IN_MENU = name === 'menu';
+  IN_MENU = isMenu(name);
   SPAWN.copy(L.spawn);
   SPAWN_YAW = L.spawnYaw;
   social.nav = L.nav;
@@ -3065,42 +3135,41 @@ function loadLevel(name) {
   if (vr.on) vr.urlDue = name; else setLevelUrl(name);
   // the menus follow
   for (const b of document.querySelectorAll('#levels button')) b.classList.toggle('on', b.dataset.level === name);
-  document.getElementById('toMenu').hidden = IN_MENU;
+  document.getElementById('toMenu').hidden = !backOf(name);
   sandboxMenu.setInMenu(IN_MENU);
-  vr.backToMenu = IN_MENU ? null : () => goMap('menu');
+  vr.backToMenu = backOf(name) ? () => goMap(backOf(name)) : null;
   vr.soft = !!L.soft;
   vr.noSpawn = IN_MENU;
   if (vr.menu) vr.menu.userData.hover = -2;
-  if (lobbyMenu) lobbyMenu.map = name;
   if (IN_MENU) {
-    if (!menuBoard && L.menuBoard) menuBoard = new MenuBoard(scene, L.menuBoard, MAP_BOARD, goMap);
-    if (menuBoard) menuBoard.mesh.visible = true;
+    // (each menu place has its own board: built fresh for it)
+    if (menuBoard) { menuBoard.mesh.removeFromParent(); menuBoard.laser.removeFromParent(); menuBoard.tex.dispose(); menuBoard = null; }
+    if (L.menuBoard) menuBoard = makeBoard(L.menuBoard);
     if (!booth && L.booth) booth = makeBooth(L.booth);
-    if (booth) booth.visible = true;
+    if (booth) booth.visible = !!L.booth;
   }
   // its people
   spawnCitizens(Array.from({ length: L.npcs ?? 0 }, () => makeLook()));
   for (const n of npcs) { addActor(n.actor, true); n.street = new Street(n, makePersona(), streetW); setNpcDetectionSuppressed(n, hero.god); }
   menuDummy();
-  // multiplayer: over to this map's lobbies
+  arena = makeArena(L);
+  mpArena = L.mpArena ? new MpArena({ hero, respawn: () => respawn() }) : null;
+  applyMode(L);
+  // multiplayer (multiplayer/session.js): the session follows the map
   mp.g.levelName = name;
   mp.g.level = L;
   mp.npcIndex = new Map(npcs.map((n, i) => [n.actor, i]));
   for (const n of npcs) n.actor.onRemoteHit = (...args) => mp.forwardHit(n.actor, ...args);
-  if (mp.net.room) {
-    mp.dropAll();
-    const pick = takeLobbyPick(name);
-    mp.net.level = name;
-    mp.net.lobby = null; mp.net.code = null;
-    mp.net.wantLobby = pick.n; mp.net.wantCode = pick.code;
-    if (pick.code) mp.net.goPrivate(pick.code); else mp.net.hello(pick.n ?? null);
-  }
+  mp.dropAll();
+  voice.clear();
   // and a clean start in it
   resetWorld(false);
   applyFullbright();
 }
-const MAP_BOARD = [{ id: 'baseplate', name: 'Baseplate' }, { id: 'room', name: 'Room' }, { id: 'racetrack', name: 'Racetrack' }];
-let menuBoard = level.menuBoard ? new MenuBoard(scene, level.menuBoard, MAP_BOARD, goMap) : null;
+// a menu place's board (the level says what's on it): the main menu's Sandbox / Multiplayer
+// Arena, the sandbox room's maps
+const makeBoard = (B) => new MenuBoard(scene, B, B.maps, goMap, { title: B.title, logo: B.logo });
+let menuBoard = level.menuBoard ? makeBoard(level.menuBoard) : null;
 // the dressing booth by it: every pick worn at once, saved and shown to everyone
 const makeBooth = (spot) => new DressingBooth(scene, spot, () => hero.hero, () => {
   sfx('pickup', 0.25);
@@ -3258,6 +3327,8 @@ function frame() {
   mp.update(dt);
   for (const a of actors) if (a.remote) a.hero.costumeTick?.(dt);
   survival?.update(dt);
+  arena?.update(dt);
+  mpArena?.update(dt);
   resolveBumps(actors, dt);
   vehicles.keepOut(actors, dt);
   for (const m of melees) m.update(dt);
@@ -3296,7 +3367,7 @@ function frame() {
   } else { deadT = 0; deathStingPlayed = false; }
   deadEl.classList.toggle('on', deadT > DEAD_WAIT);
   if (deadT > DEAD_WAIT) {
-    const dt2 = survival?.active ? survival.deadText() : null;
+    const dt2 = survival?.active ? survival.deadText() : arena?.active ? 'You’re down…' : mpArena ? mpArena.deadText() : null;
     if (dt2 !== deadEl._sv) { deadEl._sv = dt2; deadEl.innerHTML = dt2 || '<b>R</b> Sandbox menu · click to respawn'; }
   }
   // the dead sometimes had cash on them
@@ -3311,7 +3382,7 @@ function frame() {
       }
       continue;
     }
-    if (n.heroHitT && streetW.now() - n.heroHitT < 20) wanted.crime('kill', n);
+    if (!n.arena && n.heroHitT && streetW.now() - n.heroHitT < 20) wanted.crime('kill', n);
     money.dropFrom(n.actor.state.pos);
     // a mugger's takings spill out with them
     const loot = n.street?.cash || 0;
@@ -3331,6 +3402,7 @@ function frame() {
     doorHint.update(door ? { ...door, ready: true } : null);
   }
   mp.post(dt);
+  voice.update(dt);
   const car = hero.seat?.car;
   const p = car ? car.p : hero.focus();
   if (vr.on) { knifeTick(); vr.frame(); } else {

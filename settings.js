@@ -41,6 +41,10 @@ export const SCHEMA = [
     { k: 'goreSounds', label: 'Gore sounds', def: true },
     { k: 'screams', label: 'Screams', def: true },
   ] },
+  // voice chat (multiplayer/voice.js): off = open mic, always heard; on = only while Y is held
+  { name: 'Voice', items: [
+    { k: 'pushToTalk', label: 'Push to talk (hold Y)', def: false },
+  ] },
 ];
 // Not in the menu any more (a headset can't reach them): always their base value, for the code
 // that still reads them.

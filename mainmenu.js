@@ -5,13 +5,18 @@ import * as THREE from 'three';
   point a VR controller at it and pull the trigger.
 */
 
-const W = 1024, H = 640, PW = 3.4, PH = PW * H / W, REACH = 10;
+const W = 1024, H = 640, REACH = 10;
 const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _d = new THREE.Vector3();
 
 export class MenuBoard {
-  /** maps: [{ id, name }]; go(id) */
-  constructor(scene, { pos, yaw }, maps, go) {
+  /**
+   * maps: [{ id, name }]; go(id). opt = { title, logo (the menu logo over it), width (m) } -
+   * the arena's spawn room uses one too, for its Start button.
+   */
+  constructor(scene, { pos, yaw }, maps, go, opt = {}) {
     this.go = go;
+    this.title = opt.title ?? 'Choose a map';
+    const PW = opt.width ?? 3.4, PH = PW * H / W;
     this.c = document.createElement('canvas');
     this.c.width = W; this.c.height = H;
     this.tex = new THREE.CanvasTexture(this.c);
@@ -36,7 +41,7 @@ export class MenuBoard {
       logo.visible = true;
     });
     logo.visible = false; // (till the picture's in)
-    this.mesh.add(logo);
+    if (opt.logo !== false) this.mesh.add(logo);
     scene.add(this.mesh);
     // every map the same size, side by side (up to 3 to a row), centred under the title
     const P = 48, G = 32, per = Math.min(3, maps.length), rows = Math.ceil(maps.length / per);
@@ -63,10 +68,10 @@ export class MenuBoard {
     g.fillStyle = '#f2efe8';
     g.font = 'bold 64px system-ui, sans-serif';
     g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText('Choose a map', W / 2, 66);
+    g.fillText(this.title, W / 2, 66);
     this.buttons.forEach((b, i) => {
       const on = i === hover;
-      g.fillStyle = on ? '#ffd65a' : 'rgba(255,255,255,0.1)';
+      g.fillStyle = on ? '#ffd65a' : b.color || 'rgba(255,255,255,0.1)';
       g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 22); g.fill();
       g.fillStyle = on ? '#15130c' : '#f2efe8';
       g.font = 'bold 58px system-ui, sans-serif';

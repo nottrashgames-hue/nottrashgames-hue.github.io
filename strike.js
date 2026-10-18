@@ -140,3 +140,70 @@ export function sweep(a0, b0, a1, b1, wr, actors, self, skip, selfParts = null) 
   }
   return best;
 }
+
+
+/*
+  Things held in a hand that a blow can run into on its way (melee.js weapons, gun.js guns):
+  physically in the way, not just "guarding". Each one registers itself here; parry() sweeps a
+  blow against the box round every held item but the attacker's own, so a weapon (or a gun)
+  held across where a punch, a kick or a swing is going stops it there - whoever's holding it,
+  whatever they're doing.
+*/
+export const HELD_ITEMS = new Set();
+const _box = new THREE.Box3(), _inv = new THREE.Matrix4(), _rel = new THREE.Matrix4(), _ray = new THREE.Ray();
+const _la = V(), _lb = V(), _hit = V(), _dir = V(), _ip = V();
+/** The item's own (mesh-local) bounds, worked out once. */
+function localBox(root) {
+  const u = root.userData;
+  if (u._lbox) return u._lbox;
+  root.updateMatrixWorld(true);
+  _inv.copy(root.matrixWorld).invert();
+  const b = new THREE.Box3();
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry?.attributes?.position) return;
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    b.union(_box.copy(o.geometry.boundingBox).applyMatrix4(_rel.multiplyMatrices(_inv, o.matrixWorld)));
+  });
+  if (b.isEmpty()) b.setFromCenterAndSize(V(), V(0.05, 0.05, 0.05));
+  return (u._lbox = b);
+}
+/** First point along segment a-b (world) inside the box (local to M's inverse), or null. Returns t 0..1. */
+function segBox(a, b, inv, box) {
+  _la.copy(a).applyMatrix4(inv); _lb.copy(b).applyMatrix4(inv);
+  if (box.containsPoint(_la)) return 0;
+  const len = _dir.subVectors(_lb, _la).length();
+  if (len < 1e-6) return null;
+  _ray.set(_la, _dir.divideScalar(len));
+  if (!_ray.intersectBox(box, _ip)) return null;
+  const t = _ip.distanceTo(_la) / len;
+  return t <= 1 ? t : null;
+}
+
+/**
+ * Did the blow swept (a0,b0) -> (a1,b1) (radius wr) run into an item someone else is holding,
+ * at or before kMax through the sweep? Returns { item, owner, k, point } or null.
+ */
+export function parry(a0, b0, a1, b1, wr, attacker, kMax = 1) {
+  if (!HELD_ITEMS.size) return null;
+  let best = null;
+  const N = 6;
+  for (const it of HELD_ITEMS) {
+    const m = it.mesh, o = it.owner;
+    if (it.state !== 'held' || !o || o === attacker || !m?.visible || it.stuckIn || o.brain?.dead || o.mode === 'ragdoll') continue;
+    m.updateWorldMatrix(true, false);
+    _p.setFromMatrixPosition(m.matrixWorld);
+    if (_p.distanceToSquared(a1) > 2.6 && _p.distanceToSquared(b1) > 2.6 && _p.distanceToSquared(a0) > 2.6) continue;
+    const box = _box.copy(localBox(m)).expandByScalar(wr * 0.8);
+    _inv.copy(m.matrixWorld).invert();
+    for (let i = 0; i <= N; i++) {
+      const k = (i / N) * kMax;
+      if (best && k >= best.k) break;
+      _A.lerpVectors(a0, a1, k); _B.lerpVectors(b0, b1, k);
+      const t = segBox(_A, _B, _inv, box);
+      if (t === null) continue;
+      best = { item: it, owner: o, k, point: _hit.lerpVectors(_A, _B, t).clone() };
+      break;
+    }
+  }
+  return best;
+}

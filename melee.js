@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { poseArm } from './gun.js';
-import { sweep, partNear } from './strike.js';
+import { sweep, partNear, parry } from './strike.js';
+import { HELD_ITEMS } from './strike.js';
 import { buildBat, buildCrowbar, buildMachete, buildLongsword, buildSledge, buildClawHammer, buildHuntingKnife, buildHatchet, buildFireAxe, buildSpear, buildRuler, buildHandSaw, buildPencil } from './meleemodels.js';
 import { sawStep } from './saw.js';
 import { chopHit, kerfDepth } from './chop.js';
@@ -110,6 +111,17 @@ export function guardHit(victim, vel, by, power = 1, sfx) {
   if (push.lengthSq() > 1e-6) h.vel?.addScaledVector(push.normalize(), 1.2 + 1.8 * k);
   if (k > 1.25 && Math.random() < 0.5) victim.goRagdoll?.('stumble', { balance: 0.85, decay: 0.25 });
   if (by && by !== victim) victim.brain?.hitBy?.(by, null);
+}
+
+/**
+ * A blow that ran into something held in the way (strike.js parry): it stops there - a clang
+ * off the item, the holder shoved back a little the way it came, nobody hurt.
+ */
+export function parriedBlow(pr, vel, by, power, sfx) {
+  const o = pr.owner;
+  guardHit(o, vel, by, power, sfx);
+  if (o.remote) o.onRemoteHit?.('guard', vel, power, by);
+  else o.onGuard?.(by, vel, power);
 }
 
 /** Can actor's hand i (0 left, 1 right) hold something? (not hurt out of use, not cut off) */
@@ -390,6 +402,7 @@ export class Melee {
     // (stuck in someone, it's a child of their part: never cut along with them - slice.js)
     this.mesh.userData.notBody = true;
     this.mesh.userData.melee = this; // (wounds.js: what's stuck in a body, and how deep)
+    HELD_ITEMS.add(this); // (held up in the way, it stops blows: strike.js parry)
   }
 
   /** Back on the table where it started. Call after debris.clear(). */
@@ -418,6 +431,17 @@ export class Melee {
     if (this.mesh.parent !== this.scene) this.scene.add(this.mesh);
     this.mesh.position.copy(this.rest.pos);
     this.mesh.quaternion.copy(this.rest.quat);
+  }
+
+  /** Gone for good (an arena fighter's weapon, with them): out of the scene and every list. */
+  dispose() {
+    if (this.loose) { this.debris.release?.(this.loose); this.loose = null; }
+    this.reset();
+    this.mesh.removeFromParent();
+    this.trail.cut();
+    this.trail.mesh?.removeFromParent?.();
+    this.cutter?.reset?.();
+    HELD_ITEMS.delete(this);
   }
 
   /** The ready pose / swings for the hand it's in. */
@@ -638,6 +662,14 @@ export class Melee {
         // a body in the way
         if (ub > LIVE_U) {
           const bh = sweep(prev[0], prev[1], seg1[0], seg1[1], d.r, this.ctx.actors, this.owner, C.hit);
+          // (held up in its way, a weapon / a gun takes the chop instead)
+          const pr = parry(prev[0], prev[1], seg1[0], seg1[1], d.r, this.owner, bh ? bh.k : 1);
+          if (pr) {
+            const v = seg1[1].clone().sub(prev[1]).divideScalar(Math.max(sdt, 1e-3)).clampLength(0, 40);
+            parriedBlow(pr, v, this.owner, 1.3 + C.charge * 0.5, this.ctx.sfx);
+            hit = { kind: 'world', u: lerp(ua, ub, pr.k), point: pr.point, normal: v.clone().normalize().negate(), tip: seg1[1].clone(), parry: true };
+            break;
+          }
           if (bh) { hit = { kind: 'body', u: lerp(ua, ub, bh.k), bh, prev, seg1, sdt }; break; }
           this.slashLoose(prev[0], prev[1], seg1[0], seg1[1], sdt, 1.25 + C.charge * 0.45, C.hit);
         }
@@ -847,7 +879,17 @@ export class Melee {
     else if (this.swing && c.live && this.prevSeg) {
       const [a0, b0] = this.prevSeg;
       const hit = sweep(a0, b0, a1, b1, d.r, this.ctx.actors, A, this.swing.hit);
-      if (hit) this.land(hit, a0, b0, a1, b1, dt, 1);
+      // something held in the way (a weapon, a gun): the swing stops on it, before any body
+      const pr = this.swing.parried ? null : parry(a0, b0, a1, b1, d.r, A, hit ? hit.k : 1);
+      if (pr) {
+        this.swing.parried = true;
+        const v = b1.clone().sub(b0).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 40);
+        parriedBlow(pr, v, A, 1, this.ctx.sfx);
+        this.ctx.impact?.(0.1, A, pr.owner);
+        this.stop = 0.1;
+        this.recover(d.back + 0.1);
+        this.trail.cut();
+      } else if (hit) this.land(hit, a0, b0, a1, b1, dt, 1);
       if (this.stuckIn) { this.poseStuck(h, dt); return; }
       this.slashLoose(a0, b0, a1, b1, dt, 1, this.swing.hit);
       // a wall, a car, the floor: it bounces off and the swing is over
@@ -1466,7 +1508,14 @@ export class Fists {
       const vel = k1.clone().sub(P.prev[1]).divideScalar(Math.max(dt, 1e-3)).clampLength(0, 20);
       // (a fat knuckle radius: a fist that brushes them is a fist that lands)
       const hit = sweep(P.prev[0], P.prev[1], k0, k1, 0.07, this.ctx.actors, this.actor, P.hit);
-      if (hit) this.connect(P, hit.actor, hit.part, hit.point, hit.normal, vel, yq, dir);
+      // a weapon (or a gun) held in front of where it's going: the fist stops on it
+      const pr = parry(P.prev[0], P.prev[1], k0, k1, 0.05, this.actor, hit ? hit.k : 1);
+      if (pr) {
+        P.hit.add(pr.owner);
+        parriedBlow(pr, vel.clone().multiplyScalar(0.6), this.actor, 0.6 + 0.4 * P.c, this.ctx.sfx);
+        P.stop = 0.1;
+        P.hitAt = P.t;
+      } else if (hit) this.connect(P, hit.actor, hit.part, hit.point, hit.normal, vel, yq, dir);
       else if (P.tgt && t >= T2 - 1e-3 && !P.hit.has(P.tgt.actor)) {
         // fully out and it's right there on the one it was thrown at (they moved, the arm fell
         // a hair short): it lands

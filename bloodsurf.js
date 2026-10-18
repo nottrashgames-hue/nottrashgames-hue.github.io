@@ -318,6 +318,7 @@ class Surf {
     return j * this.gw + i;
   }
   wetAdd(s, t, r, a) {
+    return; // (nothing picks it up: see BloodFloor.wetAt)
     for (let x = s - r; x <= s + r + 1e-6; x += CELL) for (let y = t - r; y <= t + r + 1e-6; y += CELL) {
       const i = this.cell(x, y);
       if (i >= 0) {
@@ -733,7 +734,10 @@ export class BloodSurfaces {
     }, ...box(s, t, 0.2));
   }
 
+  // Picking blood back up off the floor (bodies lying in it, shoes, tyres) is off: nothing
+  // soaks up what's on the ground any more. (The wetness grid is kept, it just never reads wet.)
   wetAt(p) {
+    return 0;
     const S = this.horizontal(p, false);
     if (!S) return 0;
     const { s, t } = S.st(p);
@@ -742,8 +746,10 @@ export class BloodSurfaces {
   }
   /** by: whose body is soaking it up - pickedOwn says whether what it got came off that very body. */
   pickup(p, amount, by = null) {
-    const S = this.horizontal(p, false);
     this.pickedOwn = false;
+    this.picked = 0;
+    return 0;
+    const S = this.horizontal(p, false);
     if (!S) return 0;
     const { s, t } = S.st(p);
     const i = S.cell(s, t);

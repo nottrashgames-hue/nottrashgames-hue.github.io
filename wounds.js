@@ -855,7 +855,11 @@ export class Wounds {
     this.blooms = this.blooms.filter((b) => b.t < 2.5);
     // floor contact sampling runs at ~30 Hz (it's hundreds of surface points per body)
     this.contactAcc = (this.contactAcc || 0) + dt;
-    const cdt = this.contactAcc >= 1 / 30 ? this.contactAcc : 0;
+    // a body that's been dead a while barely moves: its floor contact (and cloth soaking, below)
+    // runs a lot less often - with a few corpses lying in the blood this was most of the frame
+    this.deadT = A.brain?.dead ? (this.deadT || 0) + dt : 0;
+    const still = this.deadT > 4;
+    const cdt = this.contactAcc >= (still ? 1 / 6 : 1 / 30) ? this.contactAcc : 0;
     if (cdt) this.contactAcc = 0;
     if (A.mode === 'ragdoll') { this.sensePhysical(dt); if (cdt) this.contacts(cdt, false); }
     else {
@@ -871,11 +875,15 @@ export class Wounds {
     // what a part or shoe carries dries out too: it stops shedding drops and printing
     for (const p of Object.values(this.parts)) if (p.wet > 0) p.wet = Math.max(0, p.wet - dt / DRY_T);
     for (const f of this.feet) if (f.wet > 0) f.wet = Math.max(0, f.wet - dt / DRY_T);
+    this.volAcc = (this.volAcc || 0) + dt;
+    if (still && (this.frame % 4)) return;
+    const vdt = Math.min(0.15, this.volAcc);
+    this.volAcc = 0;
     for (const v of this.vols) {
       if (!v.vol.data) continue;
       // fabric wicks downhill: world down in the volume's frame
       v.vol.down.copy(DOWN).applyQuaternion(v.group.getWorldQuaternion(_q).invert());
-      v.vol.update(dt, budget);
+      v.vol.update(vdt, budget);
     }
   }
 

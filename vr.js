@@ -397,6 +397,10 @@ export class VRMode {
     const lb = L?.buttons.length || 0;
     for (let i = 6; i < lb; i++) if (this.edge('left', i)) menuBtn = true;
     if (menuBtn) { this.spawner?.close(); this.toggleMenu(); }
+    // push to talk (Settings -> Voice -> "Push to talk"): press the left thumbstick in.
+    // (with the setting off - open mic - this does nothing, see multiplayer/voice.js)
+    const talk = this.btnDown('left', 3);
+    if (talk !== this.talkDown) { this.talkDown = talk; window.__voice?.talk?.(talk); }
     if (this.menu?.visible) this.updateMenu();
     this.scanner.input();
   }
@@ -1316,7 +1320,8 @@ export class VRMode {
       return rows;
     }
     return [
-      { label: 'Reset world', act: () => this.resetWorld?.() },
+      ...(this.canStartRound?.() ? [{ label: 'Start round', act: () => this.startRound?.() }] : []),
+      ...(this.noReset ? [] : [{ label: 'Reset world', act: () => this.resetWorld?.() }]),
       { label: 'Clear blood', act: () => this.clearBlood?.() },
       { label: 'Settings', act: () => this.openPage('settings'), keep: true },
       { label: 'Calibrate height', act: () => this.calibrate() },
@@ -1564,6 +1569,7 @@ export class VRMode {
     return null;
   }
   openWheel() {
+    if (this.noWheel) return; // (the multiplayer arena: you fight with what you spawned with)
     const R = this.hands.right;
     if (!R?.grip.visible) return;
     this.wheel ||= this.buildWheel();

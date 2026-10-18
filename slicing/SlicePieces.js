@@ -161,7 +161,7 @@ export class SlicePieces {
     mesh.castShadow = true;
     mesh.visible = true;
     scene.add(mesh);
-    const piece = { mesh, body, col, mats, age: 0, fade: 0, drip: 0, cap: null };
+    const piece = { mesh, body, col, mats, age: 0, fade: 0, fadeS: null, drip: 0, cap: null };
     this.sync(piece);
     this.pieces.push(piece);
     return piece;
@@ -212,14 +212,12 @@ export class SlicePieces {
       }
       if (!p.fade && !p.keep && p.age > GORE.pieceLifetime && p.body.isSleeping()) p.fade = 0.001;
       if (p.fade) {
-        if (!p.fadeMats) { // (its own transparent copies, only once it starts to go)
-          p.fadeMats = p.mats.map((m) => { const c = m.clone(); c.transparent = true; return c; });
-          p.mesh.material = p.fadeMats;
-          Sliceable.detach(p.mesh);
-        }
+        // shrinks away (no transparent material copies: each one would be a new shader to
+        // compile, a hitch every time a piece goes)
+        if (!p.fadeS) { p.fadeS = p.mesh.scale.clone(); Sliceable.detach(p.mesh); }
         p.fade += dt;
         const k = 1 - p.fade / GORE.fadeTime;
-        for (const m of p.fadeMats) m.opacity = Math.max(0, k);
+        p.mesh.scale.copy(p.fadeS).multiplyScalar(Math.max(0.001, k));
         if (k <= 0) { this.recycle(p); this.pieces.splice(i, 1); }
       }
     }

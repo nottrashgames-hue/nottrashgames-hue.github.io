@@ -41,7 +41,7 @@ export class SandboxMenu {
             '<button data-object="log">Log</button><button data-object="meat">Meat</button><button data-object="sack">Sack</button><button data-object="plate">Steel plate</button>' +
           '</div><p class="object-note">Available in Invincible mode.</p></section>') +
           '<section class="sandbox-card map-card"><h2>Maps</h2><div class="sandbox-options map-options">' +
-            '<button data-map="baseplate">Baseplate</button><button data-map="room">Room</button><button data-map="racetrack">Racetrack</button>' +
+            '<button data-map="baseplate">Baseplate</button><button data-map="room">Room</button><button data-map="racetrack">Racetrack</button><button data-map="arena">Arena</button><button data-map="mparena">Multiplayer Arena</button>' +
           '</div></section>' +
         '</div>' +
       '</section>';

@@ -53,20 +53,88 @@ function baseLevel(colliders, sun, surface, spawn, npcs) {
   return { colliders, sun, seats: [], parking: [], table: { x: 10000, z: 10000, top: 0 }, surfaceAt: () => surface, spawn: V(...spawn), spawnYaw: 0, spawnR: 5, npcs };
 }
 
-export function buildArena(scene) {
-  const sun = addSky(scene, { sky: 0x93aab8, fogNear: 70, fogFar: 190, hemi: 1.2, sunI: 2.8, span: 30 });
+/**
+ * The arena: a walled pit for wave fights, and next to it (walled off, roofed) the little spawn
+ * room you start in, with the button that starts a round (arena.js) and sends you in.
+ */
+export function buildArena(scene, renderer, opt = {}) {
+  const sun = addSky(scene, { sky: 0x8fa0ad, fogNear: 70, fogFar: 180, hemi: 1.3, sunI: 2.7, span: 34 });
   const colliders = new Colliders();
-  const concrete = new THREE.MeshStandardMaterial({ color: 0x9a9a90, roughness: 0.92 });
-  floor(scene, colliders, 100, concrete, 'concrete');
-  const wall = 0x64727d;
-  box(scene, colliders, 100, 8, 1, 0, 0, -50, wall);
-  box(scene, colliders, 100, 8, 1, 0, 0, 50, wall);
-  box(scene, colliders, 1, 8, 100, -50, 0, 0, wall);
-  box(scene, colliders, 1, 8, 100, 50, 0, 0, wall);
-  for (const [x, z, color] of [[-18, -18, 0xc15243], [18, -18, 0x3a86a8], [-18, 18, 0xd3a64b], [18, 18, 0x667e52]]) {
-    box(scene, colliders, 6, 2.6, 6, x, 0, z, color);
+  floor(scene, colliders, 140, new THREE.MeshStandardMaterial({ color: 0x6f6658, roughness: 0.97 }), 'concrete');
+  // the pit: sand, high walls, a few pillars to fight round
+  const R = 20, H = 6;
+  const sandTex = new THREE.TextureLoader().load('sand_dif.jpg');
+  sandTex.wrapS = sandTex.wrapT = THREE.RepeatWrapping;
+  sandTex.colorSpace = THREE.SRGBColorSpace;
+  sandTex.anisotropy = Math.min(8, renderer?.capabilities.getMaxAnisotropy() || 1);
+  sandTex.repeat.set(R * 2 / 3, R * 2 / 3); // (a tile every 3 m)
+  const sand = new THREE.Mesh(new THREE.PlaneGeometry(R * 2, R * 2), new THREE.MeshStandardMaterial({ map: sandTex, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  sand.rotation.x = -Math.PI / 2; sand.position.y = 0.002; sand.receiveShadow = true;
+  scene.add(sand);
+  const wall = concrete(renderer, R * 2, H);
+  box(scene, colliders, R * 2 + 2, H, 1, 0, 0, -R - 0.5, wall);
+  box(scene, colliders, R * 2 + 2, H, 1, 0, 0, R + 0.5, wall);
+  box(scene, colliders, 1, H, R * 2, -R - 0.5, 0, 0, wall);
+  box(scene, colliders, 1, H, R * 2, R + 0.5, 0, 0, wall);
+  // a red band round the top of the wall
+  const band = new THREE.MeshStandardMaterial({ color: 0x8c2a22, roughness: 0.8 });
+  for (const [w, d, x, z] of [[R * 2 + 2.2, 1.2, 0, -R - 0.5], [R * 2 + 2.2, 1.2, 0, R + 0.5], [1.2, R * 2 + 2.2, -R - 0.5, 0], [1.2, R * 2 + 2.2, R + 0.5, 0]]) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.3, d), band);
+    m.position.set(x, H + 0.15, z); m.castShadow = true;
+    scene.add(m);
   }
-  return baseLevel(colliders, sun, 'concrete', [0, 0, 0], 4);
+  const stone = concrete(renderer, 2, 3);
+  for (const [x, z] of [[-8, -8], [8, -8], [-8, 8], [8, 8]]) box(scene, colliders, 1.6, 3, 1.6, x, 0, z, stone);
+  // the gates they come in by (dark recesses in the walls)
+  const dark = new THREE.MeshStandardMaterial({ color: 0x15110e, roughness: 1 });
+  const gates = [];
+  for (const [x, z, yaw] of [[0, -R, 0], [-R, 0, Math.PI / 2], [R, 0, -Math.PI / 2], [-R * 0.6, -R, 0], [R * 0.6, -R, 0]]) {
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 3.2), dark);
+    const out = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    g.position.set(x + out.x * 0.01, 1.6, z + out.z * 0.01);
+    g.rotation.y = yaw;
+    scene.add(g);
+    gates.push({ pos: V(x + out.x * 1.2, 0, z + out.z * 1.2), yaw });
+  }
+
+  // the multiplayer arena: just the pit - everyone spawns (and respawns) straight into it
+  if (opt.mp) {
+    const lvl = baseLevel(colliders, sun, 'concrete', [0, 0, 0], 0);
+    lvl.spawnR = R - 6;
+    lvl.clean = true;
+    lvl.mpArena = { half: R };
+    return lvl;
+  }
+  // the spawn room: walled off and roofed, south of the pit
+  const S = 6, RZ = R + 14, RH = 4;
+  const room = new THREE.MeshStandardMaterial({ color: 0xcfc6b6, roughness: 0.9 });
+  box(scene, colliders, S * 2 + 2, RH, 1, 0, 0, RZ - S - 0.5, room);
+  box(scene, colliders, S * 2 + 2, RH, 1, 0, 0, RZ + S + 0.5, room);
+  box(scene, colliders, 1, RH, S * 2, -S - 0.5, 0, RZ, room);
+  box(scene, colliders, 1, RH, S * 2, S + 0.5, 0, RZ, room);
+  const rf = new THREE.Mesh(new THREE.BoxGeometry(S * 2 + 2, 0.4, S * 2 + 2), new THREE.MeshStandardMaterial({ color: 0xe0d8ca, roughness: 0.9 }));
+  rf.position.set(0, RH + 0.2, RZ); rf.receiveShadow = true;
+  scene.add(rf);
+  colliders.solids.push({ type: 'box', x: 0, y: RH + 0.2, z: RZ, w: S * 2 + 2, h: 0.4, d: S * 2 + 2 });
+  const mat = new THREE.Mesh(new THREE.PlaneGeometry(S * 2, S * 2), new THREE.MeshStandardMaterial({ color: 0x4d3a33, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  mat.rotation.x = -Math.PI / 2; mat.position.set(0, 0.002, RZ); mat.receiveShadow = true;
+  scene.add(mat);
+  // a light in there (the roof keeps the sun out)
+  const lamp = new THREE.PointLight(0xfff0d8, 14, 14, 1.6);
+  lamp.position.set(0, RH - 0.4, RZ);
+  scene.add(lamp);
+
+  const lvl = baseLevel(colliders, sun, 'concrete', [0, 0, RZ + 1], 0);
+  lvl.spawnR = 1.5;
+  lvl.spawnYaw = Math.PI; // (facing the button)
+  lvl.clean = true;
+  lvl.arena = {
+    button: V(0, 0, RZ - 3),
+    board: { pos: V(0, 2, RZ - S + 0.02), yaw: 0 },
+    entry: V(0, 0, R - 4), entryYaw: Math.PI, entryR: 2.5,
+    gates, half: R,
+  };
+  return lvl;
 }
 
 export function buildObby(scene) {
@@ -132,7 +200,33 @@ export function buildMenuRoom(scene) {
   lvl.spawnR = 1.2;
   lvl.spawnYaw = Math.PI; // (facing the board)
   lvl.dummyAt = V(3.5, 0, 0);
-  lvl.menuBoard = { pos: V(0, 2.4, -S + 0.02), yaw: 0 };
+  // the sandbox's maps (single player)
+  lvl.menuBoard = { pos: V(0, 2.4, -S + 0.02), yaw: 0, title: 'Choose a map',
+    maps: [{ id: 'baseplate', name: 'Baseplate' }, { id: 'room', name: 'Room' }, { id: 'racetrack', name: 'Racetrack' }, { id: 'arena', name: 'Arena' }] };
+  return lvl;
+}
+
+/**
+ * The main menu: where everyone starts (and a headset always starts). One board - Sandbox (the
+ * menu room above, single player) or Multiplayer Arena - and the dressing booth to make your
+ * character in before you go.
+ */
+export function buildMainMenu(scene) {
+  const sun = addSky(scene, { sky: 0x1f2230, fogNear: 60, fogFar: 160, hemi: 1.5, sunI: 2.2, span: 12 });
+  const colliders = new Colliders();
+  floor(scene, colliders, 60, new THREE.MeshStandardMaterial({ color: 0x3a3f4f, roughness: 0.85 }), 'concrete');
+  const S = 8, wall = 0x9aa3b8;
+  box(scene, colliders, S * 2 + 1, 5, 1, 0, 0, -S - 0.5, wall);
+  box(scene, colliders, S * 2 + 1, 5, 1, 0, 0, S + 0.5, wall);
+  box(scene, colliders, 1, 5, S * 2 + 1, -S - 0.5, 0, 0, wall);
+  box(scene, colliders, 1, 5, S * 2 + 1, S + 0.5, 0, 0, wall);
+  roof(scene, colliders, S * 2 + 2, S * 2 + 2, 5, new THREE.MeshStandardMaterial({ color: 0xc8cedb, roughness: 0.9 }));
+  const lvl = baseLevel(colliders, sun, 'concrete', [0, 0, 4], 0);
+  lvl.spawnR = 1.2;
+  lvl.spawnYaw = Math.PI; // (facing the board)
+  lvl.clean = true;
+  lvl.menuBoard = { pos: V(0, 2.4, -S + 0.02), yaw: 0, title: 'Play',
+    maps: [{ id: 'menu', name: 'Sandbox' }, { id: 'mparena', name: 'Multiplayer Arena', color: '#7a1f1a' }] };
   // the dressing booth on the east wall: two partitions, a mat, the mirror and its panel (booth.js)
   const wood = new THREE.MeshStandardMaterial({ color: 0x6b4a33, roughness: 0.7 });
   for (const z of [1.7, 5.9]) box(scene, colliders, 1.5, 2.6, 0.1, S - 0.75, 0, z, wood, 'wood');

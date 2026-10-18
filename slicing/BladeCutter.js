@@ -482,8 +482,9 @@ export class BladeCutter {
     // blade turns in the wound, the opening is re-cut along the new path - one smooth curving
     // cut, the very surface the cut through will follow, never a fan of separate slits
     const nowT = performance.now();
-    const turned = S?.gash && C.nLastL && C.F === g && C.path.length > 1 && (S.rebuilds || 0) < 60 &&
-      nowT - (S.builtAt || 0) > (S.torso ? 90 : 45) && Math.abs(C.nLastL.dot(S.nTip)) < 0.9985;
+    const turned = S?.gash && C.nLastL && C.F === g && C.path.length > 1 && (S.rebuilds || 0) < 4 &&
+      nowT - (S.builtAt || 0) > (S.torso ? 280 : 160) && Math.abs(C.nLastL.dot(S.nTip)) < 0.994;
+    // (each re-cut re-slices every mesh of the part - the torso's whole skinned body: only a few, spaced out)
     if ((!S || turned) && C.depth > 0.01) {
       const q = g.getWorldQuaternion(new THREE.Quaternion()).invert();
       // the plane: the whole stroke's (local: the part may have turned too), through where it went in
@@ -506,7 +507,7 @@ export class BladeCutter {
     if (S?.gash) {
       // (the mesh is cut just as far as the edge has gone, no further - a slit the blade's width)
       const nk = clamp(k, 0.03, noCut ? maxK : 0.95);
-      if (nk - S.k > 0.004 || !S.shown) { S.k = Math.max(S.k, nk); S.shown = true; try { updateGash(S); } catch (e) { /* the part's gone */ } }
+      if (nk - S.k > 0.02 || (nk >= (noCut ? maxK : 0.95) && nk > S.k) || !S.shown) { S.k = Math.max(S.k, nk); S.shown = true; try { updateGash(S); } catch (e) { /* the part's gone */ } }
     }
     // deep enough to open a vessel: it pumps out of the wound with every heartbeat from now on
     if (k > 0.35 && !C.artery && S?.gash && this.ctx.blood?.arteries) {

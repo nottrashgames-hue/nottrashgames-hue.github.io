@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { DIM } from './character.js';
 import { solveTwoBone, orient } from './ik.js';
+import { HELD_ITEMS } from './strike.js';
 import { buildGun, buildMag, buildRifleMag, buildShell, buildMGMag, buildSMGMag, SMG_MAG_LEN, buildDMRMag, buildSniperMag, buildRocketMag, ROCKET_MAG_LEN, MG_MAG_LEN, DMR_MAG_LEN, SNIPER_MAG_LEN, CASE_GEO, CASE_MAT, SHELL_GEO, SHELL_MAT, MUZZLE, PORT, MAG_LEN, MAG_AXIS, RIFLE_MAG_LEN, RIFLE_MAG_AXIS, GRIP_TILT } from './gunmodel.js';
 
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -207,6 +208,7 @@ export class Gun {
     this.boltT = -1;         // bolt action: working the bolt (s), -1 when not
     const { gun, slide, mag, magWell } = buildGun(type);
     this.mesh = gun;
+    HELD_ITEMS.add(this); // (in a hand, it's in the way of blows: strike.js parry)
     this.slide = slide;
     this.mag = mag;          // mesh currently in the well (null while out)
     this.magWell = magWell;

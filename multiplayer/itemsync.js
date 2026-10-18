@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { Gun } from './gun.js';
-import { armUp } from './melee.js';
+import { Gun } from '../gun.js';
+import { armUp } from '../melee.js';
 
 /*
   Multiplayer, things lying about: weapons (every pistol, bat, crowbar, machete - the table's,

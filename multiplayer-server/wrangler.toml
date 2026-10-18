@@ -1,0 +1,16 @@
+name = "bloodline-mp"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# One Durable Object per room (a room is a level). SQLite-backed classes are the ones the
+# Workers *free* plan allows, so this stays on $0.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[dev]
+port = 8787

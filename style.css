@@ -756,3 +756,15 @@ body.vr #self-btns { display: none; }
 }
 @keyframes loading-spin { to { transform: rotate(360deg); } }
 #sandbox-menu .sb-play[hidden] { display: none !important; }
+
+#arenaHud { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 8px; background: rgba(20,8,6,.6); color: #ffe9e2; font: 800 18px system-ui, sans-serif; pointer-events: none; display: none; z-index: 20; }
+#arenaHud.on { display: block; }
+#arenaBanner { position: fixed; top: 28%; left: 50%; transform: translateX(-50%); color: #ffe9e2; font: 900 44px system-ui, sans-serif; text-shadow: 0 3px 12px rgba(0,0,0,.7); pointer-events: none; opacity: 0; transition: opacity .3s; z-index: 20; white-space: nowrap; }
+#arenaBanner.on { opacity: 1; }
+
+#arenaStart { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); display: none; padding: 14px 34px; border: 0; border-radius: 12px; background: #d8261c; color: #fff; font: 900 22px system-ui, sans-serif; letter-spacing: .02em; box-shadow: 0 6px 0 #7a120c, 0 10px 24px rgba(0,0,0,.4); cursor: pointer; z-index: 25; }
+#arenaStart.on { display: block; }
+#arenaStart:hover { background: #ea3328; }
+#arenaStart:active { transform: translateX(-50%) translateY(4px); box-shadow: 0 2px 0 #7a120c, 0 6px 16px rgba(0,0,0,.4); }
+#arenaGo { background: #d8261c; color: #fff; }
+#arenaStart.locked::after { content: 'Esc'; margin-left: 12px; padding: 2px 7px; border-radius: 5px; background: rgba(0,0,0,.3); font-size: 14px; vertical-align: 3px; }

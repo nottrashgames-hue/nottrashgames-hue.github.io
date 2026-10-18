@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { sweep } from './strike.js';
+import { sweep, parry } from './strike.js';
+import { parriedBlow } from './melee.js';
 import { inkOf } from './inks.js';
 
 /*
@@ -57,6 +58,7 @@ export class Kick {
     this.world = false;
     this.prev = null;
     this.whoosh = false;
+    this.parried = false;
     return true;
   }
 
@@ -76,7 +78,16 @@ export class Kick {
       if (vel.length() < 1.2 && this.kind !== 'stomp') vel.copy(h.forward(V())).multiplyScalar(3);
       // (a stomp: the body's weight straight down through them, pinning them to the floor)
       if (this.kind === 'stomp') vel.set(vel.x * 0.2, Math.min(vel.y, -7), vel.z * 0.2);
-      const hit = sweep(this.prev[0], this.prev[1], heel, toe, 0.07, this.ctx.actors, this.actor, this.hit);
+      let hit = this.parried ? null : sweep(this.prev[0], this.prev[1], heel, toe, 0.07, this.ctx.actors, this.actor, this.hit);
+      // a weapon (or a gun) held in the way: the foot stops on it
+      const pr = this.parried ? null : parry(this.prev[0], this.prev[1], heel, toe, 0.06, this.actor, hit ? hit.k : 1);
+      if (pr) {
+        this.parried = true;
+        hit = null;
+        parriedBlow(pr, vel, this.actor, 0.8, this.ctx.sfx);
+        this.ctx.impact?.(0.08, this.actor, pr.owner);
+        k.stop = 0.06;
+      }
       if (hit) {
         this.hit.add(hit.actor);
         const push = vel.clone();

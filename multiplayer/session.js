@@ -1,14 +1,14 @@
 import * as THREE from 'three';
-import { Actor } from './actor.js';
+import { Actor } from '../actor.js';
 import { Net } from './net.js';
-import { specialLook, wearSpecial, SPECIAL_SHAPE } from './special.js';
+import { specialLook, wearSpecial, SPECIAL_SHAPE } from '../special.js';
 import { ItemSync } from './itemsync.js';
-import { SHAPE_KEYS } from './character.js';
-import { sanitizeLook } from './wardrobe.js';
-import { freshMatrices } from './slice.js';
-import { guardHit, WEAPONS } from './melee.js';
-import { WeaponBlood } from './weaponblood.js';
-import { inkOf } from './inks.js';
+import { SHAPE_KEYS } from '../character.js';
+import { sanitizeLook } from '../wardrobe.js';
+import { freshMatrices } from '../slice.js';
+import { guardHit, WEAPONS } from '../melee.js';
+import { WeaponBlood } from '../weaponblood.js';
+import { inkOf } from '../inks.js';
 
 const shapeOf = (l) => SHAPE_KEYS.map((k) => l?.[k]).join();
 
@@ -178,7 +178,7 @@ class Stream {
   }
 }
 
-export class Multiplayer {
+export class Session {
   /**
    * g: { scene, world, levelName, hero, npcs, vehicles, shots, props, bubbles, camera, sfx,
    *      addActor(a), removeActor(a), heldOf(a) -> {code, mesh}|null, itemMesh(code),
@@ -186,6 +186,8 @@ export class Multiplayer {
    */
   constructor(g) {
     this.g = g;
+    // (a handle for the console and for the settings panel's multiplayer section)
+    try { window.__mp = this; } catch (e) { /* no window */ }
     this.net = new Net();
     this.players = new Map(); // conn id -> { id, name, actor, tag }
     this.pool = [];
@@ -517,6 +519,14 @@ export class Multiplayer {
   }
 
   update(dt) {
+    // The Multiplayer Arena is the networked place: you join on the way in and leave on the way
+    // out (a room is a level - see multiplayer/net.js). Every other level is single player,
+    // exactly as it was.
+    const arena = !!(this.g.level && this.g.level.mpArena);
+    if (arena && !this.net.want) this.connect();
+    else if (!arena && this.net.want) this.net.close();
+    // a map change while online is a different room: move over, then carry on
+    if (this.net.live && this.net.level && this.g.levelName !== this.net.level) { this.net.connect(this.g.levelName); return; }
     if (!this.live) return;
     this.flushStains(dt);
     this.applyPuppets();
@@ -910,7 +920,7 @@ export class Multiplayer {
     if (!to || to === this.me) return;
     const loc = (name, p) => { const G = a.groups[name] || a.groups.pelvis; G.updateWorldMatrix(true, false); return vec(G.worldToLocal(_v.copy(p))); };
     let x;
-    if (kind === 'shot') x = [args[0], loc(args[0], args[1]), vec(args[2]), typeof args[3] === 'string' ? args[3] : null];
+    if (kind === 'shot') x = [args[0], loc(args[0], args[1]), vec(args[2])];
     else if (kind === 'struck') {
       const [name, point, vel, n, w, by] = args;
       const ws = { ...w };
@@ -977,7 +987,7 @@ export class Multiplayer {
     // (the wound is laid on the meshes where they're drawn now: limbs too, not the last render)
     freshMatrices(a);
     const pt = (name, l) => { const G = a.groups[name] || a.groups.pelvis; G.updateWorldMatrix(true, false); return G.localToWorld(unvec(l)); };
-    if (h === 'shot') a.shot(x[0], pt(x[0], x[1]), unvec(x[2]), typeof x[3] === 'string' ? x[3].slice(0, 40) : null);
+    if (h === 'shot') a.shot(x[0], pt(x[0], x[1]), unvec(x[2]));
     else if (h === 'struck') {
       const w = { ...x[4] };
       if (Array.isArray(w.axis)) w.axis = unvec(w.axis);
