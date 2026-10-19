@@ -1,8 +1,8 @@
 /*
   Voice chat: one WebRTC peer connection per other player, in a mesh (fine up to ~8 people).
   The audio is spatialised, so you hear people from where they stand, and the mic is open by
-  default or hold-to-talk with the Push to talk setting (desktop: Y; headset: the left
-  controller's Y/B button, wired in vr.js).
+  default or hold-to-talk with the Push to talk setting (desktop: hold Y; headset: press the left
+  thumbstick in - see the button wiring in vr.js).
 
   Signalling goes through the same relay as the game (multiplayer/net.js) as `{ t:'rtc', to,
   sdp|ice }` - the room passes it to that one player. Media itself is peer to peer.
@@ -42,6 +42,7 @@ export class VoiceChat {
     this.ctx = null;        // AudioContext (made on first use: needs a user gesture)
     this.error = null;      // why voice is off, for the panel
     this._v = new THREE.Vector3();
+    this._listeners = [];   // the panel's refresh, told when the mic state moves
     // (a handle for the console and the push-to-talk button in vr.js)
     try { window.__voice = this; } catch (e) { /* no window */ }
 
@@ -53,6 +54,22 @@ export class VoiceChat {
     const wake = () => { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {}); };
     addEventListener('pointerdown', wake);
     addEventListener('keydown', wake);
+
+    // ---- asking for the microphone ----
+    // The headset app drops straight into VR, and a permission prompt is far easier to answer on
+    // the flat page than through a VR session - so as the *installed* app we ask at once, on load.
+    // (In a plain browser nobody wants a mic prompt just for opening a game: there we wait for the
+    // first tap or key.) Whichever comes first wins; the browser only ever shows the one prompt.
+    const firstAsk = () => {
+      removeEventListener('pointerdown', firstAsk, true);
+      removeEventListener('keydown', firstAsk, true);
+      removeEventListener('touchstart', firstAsk, true);
+      this.ask();
+    };
+    addEventListener('pointerdown', firstAsk, true);
+    addEventListener('keydown', firstAsk, true);
+    addEventListener('touchstart', firstAsk, true);
+    if (installedApp()) this.ask();
 
     // signalling in, and players leaving
     const net = o.mp?.net;
@@ -72,6 +89,42 @@ export class VoiceChat {
   }
 
   /**
+   * Ask the browser for the microphone - once. The stream is kept and reused, so the permission
+   * prompt appears a single time however many callers ask (startup, the first tap, walking into
+   * the Arena, the panel's button). Never throws: false just means "no mic", and `error` says why.
+   */
+  ask() {
+    if (this.mic && this.mic.getAudioTracks?.().some?.((t) => t.readyState === 'live')) return Promise.resolve(true);
+    if (this._asking) return this._asking;
+    this._asking = navigator.mediaDevices
+      .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .then((stream) => {
+        this.mic = stream;
+        this.track = stream.getAudioTracks()[0] || null;
+        this.error = null;
+        // (a peer connection made before the mic was allowed gets the track now)
+        for (const pc of this.pcs.values()) {
+          if (this.track && this.mic) { try { pc.addTrack(this.track, this.mic); } catch (e) { /* already has it */ } }
+        }
+        this.emitChange();
+        return true;
+      })
+      .catch((e) => {
+        this.error = e?.name === 'NotAllowedError' ? 'mic blocked' : 'no mic';
+        this.mic = null;
+        this.track = null;
+        this.emitChange();
+        return false;
+      })
+      .finally(() => { this._asking = null; });
+    return this._asking;
+  }
+
+  /** Let whoever is drawing the panel know the mic state moved. */
+  emitChange() { for (const fn of this._listeners) { try { fn(); } catch (e) { /* ignore */ } } }
+  onChange(fn) { this._listeners.push(fn); }
+
+  /**
    * Turn voice on/off. On: ask for the mic (needs the click), make the AudioContext (also needs
    * the gesture), and start connecting to whoever is already here. Off: hang up on everyone.
    */
@@ -83,24 +136,19 @@ export class VoiceChat {
       return false;
     }
     if (this.enabled) return true;
-    this.error = null;
-    try {
-      this.mic = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      this.track = this.mic.getAudioTracks()[0] || null;
-      this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
-      if (this.ctx.state === 'suspended') await this.ctx.resume();
-      this.enabled = true;
-      this.sync();
-      for (const id of this.o.mp?.players?.keys?.() || []) this.want(String(id));
-      return true;
-    } catch (e) {
-      this.error = e?.name === 'NotAllowedError' ? 'mic blocked' : 'no mic';
+    if (!(await this.ask())) {
       this.enabled = false;
       this.sync();
       return false;
     }
+    try {
+      this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === 'suspended') await this.ctx.resume();
+    } catch (e) { /* voice still works once the first input wakes it */ }
+    this.enabled = true;
+    this.sync();
+    for (const id of this.o.mp?.players?.keys?.() || []) this.want(String(id));
+    return true;
   }
 
   // ---- wiring up to the other players ----
@@ -224,6 +272,15 @@ export class VoiceChat {
   clear() {
     for (const id of [...this.pcs.keys()]) this.removePeer(id);
   }
+}
+
+/**
+ * Are we the *installed* app (the headset's) rather than a plain browser tab? Same trick the VR
+ * grant patch uses: only the installed app has Digital Goods. It decides whether the microphone
+ * is asked for at load - the headset goes straight into VR, so the prompt has to come early.
+ */
+function installedApp() {
+  try { return typeof window.getDigitalGoodsService !== 'undefined'; } catch (e) { return false; }
 }
 
 // (AudioParam first - setPosition/setOrientation are deprecated, but old engines only have those)

@@ -38,7 +38,7 @@ function norm(m) {
 // Where the relay lives. A local test (node serve.js on 127.0.0.1) talks to `wrangler dev`.
 // Anything else talks to the deployed Worker - set the real one in MP_URL below, or override
 // at runtime with localStorage 'mpUrl' (handy for testing).
-const MP_URL = 'wss://bloodline-mp.toastuh.workers.dev/ws';
+const MP_URL = 'wss://bloodline-mp.bloodlinevr.workers.dev/ws';
 function relayUrl() {
   try {
     const over = localStorage.getItem('mpUrl');

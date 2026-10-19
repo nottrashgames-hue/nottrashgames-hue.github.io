@@ -63,6 +63,25 @@ export function mpPanel({ mp, voice }) {
     micRow.append(mLabel, mic);
     box.appendChild(micRow);
 
+    // ---- the browser's microphone permission: asked once, kept for the session ----
+    const permRow = document.createElement('div');
+    permRow.className = 'row';
+    const pLabel = document.createElement('span');
+    pLabel.textContent = 'Microphone';
+    const pValue = document.createElement('span');
+    pValue.style.cssText = 'opacity:.7';
+    const pBtn = document.createElement('button');
+    pBtn.className = 'reset';
+    pBtn.textContent = 'Allow';
+    pBtn.addEventListener('click', async () => {
+      pBtn.textContent = '...';
+      await voice.ask();
+      if (voice.mic) await voice.setEnabled(true);
+      show();
+    });
+    permRow.append(pLabel, pValue, pBtn);
+    box.appendChild(permRow);
+
     // ---- what to do with it ----
     const hint = document.createElement('div');
     hint.className = 'row';
@@ -78,8 +97,12 @@ export function mpPanel({ mp, voice }) {
           : net.status === 'connecting' ? 'Connecting...'
             : net.status === 'offline' ? 'No relay (retrying...)' : 'Off';
       mic.textContent = voice.enabled ? (voice.error || 'On') : 'Off';
+      pValue.textContent = voice.mic ? 'allowed' : voice.error === 'mic blocked' ? 'blocked' : 'not asked yet';
+      pBtn.hidden = !!voice.mic;
     }
     refresh = show;
+    // (the mic is asked for at startup and the answer can land later: keep the row honest)
+    voice.onChange?.(show);
     show();
   });
 

@@ -48,7 +48,13 @@ if errorlevel 1 (
 )
 
 echo.
-echo   Deploying the multiplayer server...
+echo   ------------------------------------------------------------------
+echo    Deploying now.
+echo.
+echo    If it asks about a "workers.dev subdomain", just type any name
+echo    you like (your name, the game's name) and press Enter. That is
+echo    the free address your game server lives at. It asks once, ever.
+echo   ------------------------------------------------------------------
 echo.
 call npx --no-install wrangler deploy
 if errorlevel 1 (
