@@ -232,13 +232,6 @@ export class VRMode {
     // came here from another map while in VR: carry straight on in the headset
     if (window.__vrGranted) start();
     else addEventListener('vr-granted', start, { once: true });
-    // Launched as an installed Meta Horizon "immersive" web app: the OS hands the page a
-    // granted session and the Trusted Web Activity shell exposes getDigitalGoodsService, so
-    // go straight in without waiting for a tap. (A plain browser tab has no XR support, or no
-    // digital-goods API, so nothing changes there.)
-    if (!window.__vrGranted && typeof window.getDigitalGoodsService !== 'undefined') {
-      setTimeout(() => { if (!this.on && !this.starting) start(); }, 800);
-    }
   }
 
   enter() {
@@ -397,10 +390,6 @@ export class VRMode {
     const lb = L?.buttons.length || 0;
     for (let i = 6; i < lb; i++) if (this.edge('left', i)) menuBtn = true;
     if (menuBtn) { this.spawner?.close(); this.toggleMenu(); }
-    // push to talk (Settings -> Voice -> "Push to talk"): press the left thumbstick in.
-    // (with the setting off - open mic - this does nothing, see multiplayer/voice.js)
-    const talk = this.btnDown('left', 3);
-    if (talk !== this.talkDown) { this.talkDown = talk; window.__voice?.talk?.(talk); }
     if (this.menu?.visible) this.updateMenu();
     this.scanner.input();
   }

@@ -1191,7 +1191,8 @@ export class Melee {
     const edge = V(0, 0, 1).applyQuaternion(this.mesh.quaternion);
     let cut = false, kerf = null;
     let slicing = false;
-    if (blade && !this.def.harmless && !this.def.noCut && !this.def.cutter) {
+    // (only someone else can cut you: your own blade wounds you, but never takes anything off)
+    if (blade && !this.def.harmless && !this.def.noCut && !this.def.cutter && hit.actor !== this.owner) {
       if (this.def.chop) {
         // a chopper: into the limb, a kerf deeper each blow, off when it's through (chop.js)
         const r = this.ctx.dismember && settings.dismember ? chopHit(this, hit, vel, axis, edge, power) : null;
@@ -1309,9 +1310,18 @@ export class Fists {
     this.start(true);
   }
 
+  /** Arm i (0: left, 1: right) cut off (slice.js / chop.js): no fist to throw with it. */
+  armGone(i) {
+    const P = this.actor.rd?.parts, n = i ? 'R' : 'L';
+    return !!(P?.['upper' + n]?.gone || P?.['fore' + n]?.gone);
+  }
+
   start(go) {
     const h = this.actor.hero;
-    const i = this.next;
+    let i = this.next;
+    // (only the arms still on throw punches: both gone, no punch at all)
+    if (this.armGone(i)) i = 1 - i;
+    if (this.armGone(i)) return;
     this.next = 1 - i;
     this.p = { i, t: 0, hit: new Set(), prevHook: h.armHook, prev: null, whoosh: false, tgt: this.acquire(), lunged: 0,
       cocking: true, hold: 0, c: 0, ...this.timing(0) };
@@ -1391,7 +1401,7 @@ export class Fists {
 
   update() {
     const A = this.actor;
-    if (this.p && (A.mode !== 'anim' || A.hero.action || A.hero.armHook !== this.hook)) this.cancel();
+    if (this.p && (A.mode !== 'anim' || A.hero.action || A.hero.armHook !== this.hook || this.armGone(this.p.i))) this.cancel();
   }
 
   pose(h, dt) {

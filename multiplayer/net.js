@@ -160,7 +160,10 @@ export class Net {
 
   /** Into the world: our name, our outfit, and the level's room. */
   hello() {
-    this.raw({ t: 'hello', level: this.level, name: this.name, look: this.lookFn?.() || null });
+    const look = this.lookFn?.() || null;
+    // (the name is whatever was typed at the dressing booth, if anything: main.js netLook)
+    const name = (look && look.name) || this.name;
+    this.raw({ t: 'hello', level: this.level, name, look });
   }
 
   /** Set our name (from the multiplayer panel). The room hears about it at once. */

@@ -46,6 +46,7 @@ import { Kick } from './kick.js';
 import { engineLoop } from './sfx.js';
 import { Session } from './multiplayer/session.js';
 import { VoiceChat } from './multiplayer/voice.js';
+import { NameTags } from './nametags.js';
 import { loadProfile, saveProfile, localLook, localLookTime } from './profile.js';
 import { Wardrobe, sanitizeLook } from './wardrobe.js';
 import { specialLook, specialSkins, SPECIAL_NAMES, BALDI, wearSpecial } from './special.js';
@@ -179,9 +180,11 @@ hero.invincible = true;
 hero.alwaysRise = true;
 {
   const shot = hero.shot.bind(hero), struck = hero.struck.bind(hero), shove = hero.shove.bind(hero);
-  hero.shot = (...a) => { if (selfHurt) return shot(...a); };
-  hero.struck = (name, point, vel, n, w, by) => { if (by === hero) return struck(name, point, vel, n, w, by); };
-  hero.shove = (dir) => { if (selfHurt) return shove(dir); };
+  // (the multiplayer arena is PvP: there anyone can hurt you - applyMode switches the protections off)
+  const pvp = () => !!level?.mpArena;
+  hero.shot = (...a) => { if (selfHurt || pvp()) return shot(...a); };
+  hero.struck = (name, point, vel, n, w, by) => { if (by === hero || pvp()) return struck(name, point, vel, n, w, by); };
+  hero.shove = (dir) => { if (selfHurt || pvp()) return shove(dir); };
 }
 const FOOTSTEP_CLIPS = {
   asphalt: ['footstep1', 'footstep2'], concrete: ['footstep3'],
@@ -923,7 +926,15 @@ const myLook = () => {
   return l;
 };
 // what other players build us from (mp.js): the outfit, and whether a special body's owner is playing it
-const netLook = () => ({ ...myLook(), plain: mySpecial && !useSpecial ? 1 : 0, variant: mySkin });
+// the name over your head (typed at the dressing booth); never typed one: Player and 4 random digits, kept
+const NAME_KEY = 'playerName', AUTO_NAME_KEY = 'playerAutoName';
+const autoName = () => {
+  let n = localStorage.getItem(AUTO_NAME_KEY);
+  if (!/^Player\d{4}$/.test(n || '')) localStorage.setItem(AUTO_NAME_KEY, n = 'Player' + String(Math.floor(Math.random() * 1e4)).padStart(4, '0'));
+  return n;
+};
+const myName = () => (localStorage.getItem(NAME_KEY) || '').trim().slice(0, 16) || autoName();
+const netLook = () => ({ ...myLook(), plain: mySpecial && !useSpecial ? 1 : 0, variant: mySkin, name: myName() });
 const shareLook = () => mp?.setLook?.(netLook());
 money.onChange = (v) => saveProfile(v, myLook());
 loadProfile().then((p) => {
@@ -2399,8 +2410,75 @@ mp = new Session({
   onNade: (m, by) => nades.onNet(m, by),
   onHostChange: (host) => { if (host) streamer.update(0); },
 });
+// ---- what happens to bodies, on every screen (multiplayer/session.js body / onBody) ----
+// The body's owner sends what it took - bullet holes, dents, gashes, cuts - in the part's own
+// frame; every other copy makes the same mark itself, and its own wound / blood systems bleed
+// from it (no blood particles go over the wire, only where the wounds are).
+{
+  const _q = new THREE.Quaternion();
+  const toLocal = (a, part, point, dirs) => {
+    const g = a.groups?.[part];
+    if (!g) return null;
+    g.updateWorldMatrix(true, false);
+    g.getWorldQuaternion(_q).invert();
+    const r2 = (v) => v.toArray().map((x) => Math.round(x * 1e4) / 1e4);
+    return { p: r2(g.worldToLocal(point.clone())), dirs: dirs.map((d) => d && r2(d.clone().applyQuaternion(_q))) };
+  };
+  // (an impactor / blade, plain numbers only - its axis turned into the part's frame too)
+  const wOut = (w, a, part) => {
+    if (!w) return null;
+    const o = {};
+    for (const [k, v] of Object.entries(w)) if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') o[k] = v;
+    if (w.axis?.isVector3) o.axis = toLocal(a, part, a.groups[part].getWorldPosition(new THREE.Vector3()), [w.axis]).dirs[0];
+    return o;
+  };
+  const wIn = (w, a, part) => {
+    if (!w) return w;
+    const o = { ...w };
+    if (Array.isArray(w.axis)) o.axis = new THREE.Vector3().fromArray(w.axis).applyQuaternion(a.groups[part].getWorldQuaternion(new THREE.Quaternion()));
+    return o;
+  };
+  Actor.onHurt = (a, k, part, point, d, x) => {
+    if (!mp.live || a.remote) return;
+    const L = toLocal(a, part, point, [d, x.n]);
+    if (!L) return;
+    mp.body(a, { k, part, p: L.p, d: L.dirs[0], n: L.dirs[1] || undefined, weapon: x.weapon || undefined,
+      w: wOut(x.w, a, part) || undefined, by: x.by ? mp.ref(x.by) : undefined });
+  };
+  // a hard fall flattening a part in
+  Actor.prototype.onDent = function (part, point, n, fd) {
+    if (!mp.live || this.remote) return;
+    const L = toLocal(this, part, point, [n]);
+    if (L) mp.body(this, { k: 'dent', part, p: L.p, d: L.dirs[0], fd });
+  };
+  // a limb (or a slice of one) off: the same plane through the same part everywhere
+  dismember.onCut = (a, part, pL, nL, vel, seed, gib) => {
+    if (!mp.live) return;
+    const r4 = (v) => v.toArray().map((x) => Math.round(x * 1e4) / 1e4);
+    mp.body(a, { k: 'cut', part, p: r4(pL), d: r4(nL), v: r4(vel || new THREE.Vector3()), seed, gib: !!gib });
+  };
+  // and theirs, here
+  mp.g.onBody = (a, m) => {
+    if (!a?.groups || !m?.part) return;
+    if (m.k === 'cut') {
+      const g = a.groups[m.part];
+      if (!g) return;
+      g.updateWorldMatrix(true, false);
+      const P = g.localToWorld(new THREE.Vector3().fromArray(m.p));
+      const N = new THREE.Vector3().fromArray(m.d).applyQuaternion(g.getWorldQuaternion(new THREE.Quaternion())).normalize();
+      // (our own body, cut by someone else: the real thing - and it goes on to everyone else from here)
+      dismember.sever(a, m.part, P, N, new THREE.Vector3().fromArray(m.v || [0, 0, 0]), { seed: m.seed, gib: m.gib, net: !!a.remote });
+      return;
+    }
+    if (!a.remote) return; // (only copies are shown hits: our own bodies took theirs for real)
+    if (m.by && m.by === mp.me) return; // (we landed it: our copy already shows it)
+    a.showHit({ ...m, w: wIn(m.w, a, m.part) });
+  };
+}
 // voice chat (multiplayer/voice.js): a stub until it's networked - open mic, or hold Y with the Push to talk setting
 const voice = new VoiceChat({ camera, mp, hero });
+// every other player's name over their head (nametags.js)
+const nameTags = new NameTags(scene);
 addEventListener('keydown', (e) => { if (e.code === 'KeyY' && !e.repeat && !chatting) voice.talk(true); });
 addEventListener('keyup', (e) => { if (e.code === 'KeyY') voice.talk(false); });
 // things you throw fly on everyone's screen (only yours does any damage)
@@ -2498,6 +2576,11 @@ var mpArena = level.mpArena ? new MpArena({ hero, respawn: () => respawn() }) : 
  */
 function applyMode(L) {
   const MPA = !!L.mpArena;
+  // PvP: you can be hurt, knocked down and killed by other players (single player: never)
+  hero.untouchable = !MPA;
+  hero.invincible = !MPA;
+  hero.alwaysRise = !MPA;
+  if (MPA && hero.god) { hero.god = false; noclipOn = false; }
   document.getElementById('reset').hidden = MPA;
   vr.noReset = MPA;
   vr.noWheel = MPA;
@@ -2803,7 +2886,7 @@ const sandboxMenu = new SandboxMenu({
   onNpc: (kind, prompt, sex) => { if (IN_MENU) return; if (kind !== 'custom' || prompt) createSandboxNpc(kind, prompt, sex); },
   onMode: (mode) => {
     localStorage.setItem('playMode', mode);
-    hero.god = mode === 'invincible';
+    hero.god = mode === 'invincible' && !level.mpArena; // (never in the PvP arena)
     noclipOn = hero.god;
     if (noclipOn) noclip.start(hero);
     for (const npc of npcs) {
@@ -3162,6 +3245,7 @@ function loadLevel(name) {
   for (const n of npcs) n.actor.onRemoteHit = (...args) => mp.forwardHit(n.actor, ...args);
   mp.dropAll();
   voice.clear();
+  nameTags.clear();
   // and a clean start in it
   resetWorld(false);
   applyFullbright();
@@ -3177,6 +3261,15 @@ const makeBooth = (spot) => new DressingBooth(scene, spot, () => hero.hero, () =
   for (const k in L) if (!SHAPE_KEYS.includes(k)) ownLook[k] = L[k];
   saveProfile(money.amount, L);
   shareLook();
+}, {
+  get: myName,
+  // (an empty name: back to the Player number)
+  set: (name) => {
+    name = (name || '').replace(/[^\w -]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16);
+    if (name) localStorage.setItem(NAME_KEY, name); else localStorage.removeItem(NAME_KEY);
+    sfx('pickup', 0.25);
+    shareLook();
+  },
 });
 let booth = level.booth ? makeBooth(level.booth) : null;
 const menuDummy = () => {
@@ -3403,6 +3496,7 @@ function frame() {
   }
   mp.post(dt);
   voice.update(dt);
+  nameTags.update(mp.players, settings.nameTags !== false);
   const car = hero.seat?.car;
   const p = car ? car.p : hero.focus();
   if (vr.on) { knifeTick(); vr.frame(); } else {

@@ -220,7 +220,7 @@ export class Session {
     N.on('welcome', (m) => this.welcome(m));
     N.on('join', (m) => { this.join(m.player); this.fullCars = true; this.items.snapshotTo(m.player.id); });
     N.on('left', (m) => this.left(m.id));
-    N.on('look', (m) => this.onLook(m));
+    N.on('name', (m) => this.onName(m));
     // (our look goes out with every hello)
     this.net.lookFn = () => g.look?.() || null;
     N.on('host', () => this.roles());
@@ -300,9 +300,12 @@ export class Session {
     // (a special body - special.js - is its own actor, never handed to anyone else)
     // their look (sent with their hello): proportions build the body, the rest is restyled on.
     // (someone with a special body who's chosen to play a normal one says so: plain)
-    const look = sanitizeLook(p.look);
-    const special = p.look?.plain ? null : specialLook(p.name, p.look?.variant);
-    const key = String(p.name).toLowerCase() + '#' + (special?.variant || 0) + '#' + SPECIAL_SHAPE.map((k) => look[k]).join();
+    // (the name they typed at the dressing booth rides in the look: main.js netLook)
+    const rawLook = p.look || null;
+    const name = rawLook?.name || p.name;
+    const look = sanitizeLook(rawLook);
+    const special = rawLook?.plain ? null : specialLook(name, rawLook?.variant);
+    const key = String(name).toLowerCase() + '#' + (special?.variant || 0) + '#' + SPECIAL_SHAPE.map((k) => look[k]).join();
     let a = special ? this.specials.get(key) : this.takePooled(look);
     if (special) this.specials.delete(key);
     else if (a) a.hero.restyle(look);
@@ -322,9 +325,12 @@ export class Session {
     a.brain.dead = false;
     const tag = document.createElement('div');
     tag.className = 'tag';
-    tag.textContent = p.name;
+    tag.textContent = name;
+    // (names are drawn by the game itself now, over each head - nametags.js. This element stays
+    //  for main.js's click-to-chat, but it isn't laid out, so the name isn't drawn twice.)
+    tag.style.display = 'none';
     this.tags.appendChild(tag);
-    this.players.set(p.id, { id: p.id, name: p.name, actor: a, tag });
+    this.players.set(p.id, { id: p.id, name, actor: a, tag, look: rawLook });
   }
   /** A pooled body built with these proportions (bodies can't be reshaped), or null. */
   takePooled(look) {
@@ -332,11 +338,22 @@ export class Session {
     const i = this.pool.findIndex((a) => shapeOf(a.hero.look) === want);
     return i < 0 ? null : this.pool.splice(i, 1)[0];
   }
-  /** Someone changed clothes / colours / hair. */
+  /** Someone changed clothes / colours / hair - or typed a new name at the booth. */
   onLook(m) {
     const P = this.players.get(m.id);
     if (!P) return;
+    P.look = m.look || null;
+    const name = m.look?.name || P.name;
+    if (name && name !== P.name) { P.name = name; P.tag.textContent = name; }
     P.actor.hero.restyle(sanitizeLook(m.look));
+  }
+  /** Someone renamed themselves from the panel (not the booth): the room says so. */
+  onName(m) {
+    const P = this.players.get(m.id);
+    if (!P || !m.name) return;
+    P.name = String(m.name);
+    P.tag.textContent = P.name;
+    if (P.look) P.look.name = P.name;
   }
   /** Ours changed: tell everyone (only when it really did). */
   setLook(look) {
@@ -1185,19 +1202,10 @@ export class Session {
   }
 
   // ---------- name tags ----------
+  // (the game draws every other player's name over their head itself - nametags.js - so these
+  //  DOM tags are left hidden: main.js still reads them for click-to-chat.)
   placeTags() {
-    const cam = this.g.camera, w = innerWidth, h = innerHeight;
-    for (const P of this.players.values()) {
-      const a = P.actor, el = P.tag;
-      a.hero.head.getWorldPosition(_v2);
-      _v2.y += 0.42;
-      const d = _v2.distanceTo(cam.position);
-      _v.copy(_v2).project(cam);
-      if (!a.hero.shown || _v.z > 1 || d > 70 || Math.abs(_v.x) > 1.1 || Math.abs(_v.y) > 1.1) { el.style.display = 'none'; continue; }
-      el.style.display = '';
-      el.style.transform = `translate(${((_v.x + 1) / 2 * w).toFixed(1)}px, ${((1 - _v.y) / 2 * h).toFixed(1)}px) translate(-50%, -100%)`;
-      el.style.opacity = String(clamp(1.4 - d / 50, 0.25, 1));
-    }
+    for (const P of this.players.values()) P.tag.style.display = 'none';
   }
 }
 

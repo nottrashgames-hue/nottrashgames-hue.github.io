@@ -240,7 +240,7 @@ export class Throws {
     if (blade && (stab || slash) && harm) this.ctx.sfx?.('flesh', 0.5 + 0.4 * k);
     if (blade && harm) w.blood?.add(point, stab || slash ? 0.8 : 0.2);
     // edge-first and fast: right through the limb (slice.js), and on it flies
-    if (harm && slash && !w.def.noCut && this.ctx.dismember?.tryCut(hit.actor, hit.part, point, vp, axis, V(0, 0, 1).applyQuaternion(m.quaternion),
+    if (harm && slash && !w.def.noCut && hit.actor !== F.by && this.ctx.dismember?.tryCut(hit.actor, hit.part, point, vp, axis, V(0, 0, 1).applyQuaternion(m.quaternion),
       { edges: w.def.edges || 1, power: 0.9, cleave: w.def.cleave || 1 })) {
       b.setLinvel({ x: lv.x * 0.7, y: lv.y * 0.7, z: lv.z * 0.7 }, true);
       return;

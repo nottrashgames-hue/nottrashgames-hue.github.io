@@ -54,6 +54,8 @@ export class VoiceChat {
     const wake = () => { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {}); };
     addEventListener('pointerdown', wake);
     addEventListener('keydown', wake);
+    addEventListener('touchstart', wake);
+    addEventListener('click', wake);
 
     // ---- asking for the microphone ----
     // The headset app drops straight into VR, and a permission prompt is far easier to answer on
@@ -76,12 +78,12 @@ export class VoiceChat {
     net?.on?.('rtc', (m) => this.onSignal(m));
     net?.on?.('left', (m) => this.removePeer(String(m.id)));
     net?.on?.('reset', () => this.clear());
+    net?.on?.('join', (m) => { if (m.player) this.want(String(m.player.id)); });
   }
 
-  /** Is our mic going out right now? Open mic unless push to talk is on (then: key held). */
-  get talking() { return this.enabled && (!settings.pushToTalk || this.held); }
-  /** The push-to-talk key (ignored with open mic). */
-  talk(down) { this.held = !!down; this.sync(); }
+  get talking() { return this.enabled; }
+  /** Push-to-talk removed: always open mic when enabled. */
+  talk(down) { /* no-op */ }
   /** Our outgoing track follows talking. */
   sync() {
     const t = this.mic?.getAudioTracks?.()[0];
@@ -104,7 +106,14 @@ export class VoiceChat {
         this.error = null;
         // (a peer connection made before the mic was allowed gets the track now)
         for (const pc of this.pcs.values()) {
-          if (this.track && this.mic) { try { pc.addTrack(this.track, this.mic); } catch (e) { /* already has it */ } }
+          if (this.track && this.mic) {
+            try {
+              const senders = pc.getSenders();
+              if (!senders.some((s) => s.track === this.track)) {
+                pc.addTrack(this.track, this.mic);
+              }
+            } catch (e) { try { pc.addTrack(this.track, this.mic); } catch (e2) { /* ignore */ } }
+          }
         }
         this.emitChange();
         return true;
@@ -152,34 +161,48 @@ export class VoiceChat {
   }
 
   // ---- wiring up to the other players ----
-  /** Connect to `id` if we're the side that offers (the lower id). */
   want(id) {
     if (!this.enabled || !id || id === String(this.o.mp?.me)) return;
-    if (String(this.o.mp?.me) < id) this.offer(id);
+    this.pcFor(id);
   }
 
   pcFor(id) {
     let pc = this.pcs.get(id);
     if (pc) return pc;
+    const polite = String(this.o.mp?.me) < id;
     pc = new RTCPeerConnection(ICE);
+    pc._polite = polite;
+    pc._makingOffer = false;
+    pc._ignoreOffer = false;
     this.pcs.set(id, pc);
     if (this.track && this.mic) pc.addTrack(this.track, this.mic);
     pc.onicecandidate = (e) => { if (e.candidate) this.signal(id, { ice: e.candidate }); };
     pc.ontrack = (e) => { try { this.addPeer(id, e.streams[0]); } catch (err) { /* ignore */ } };
+    pc.onnegotiationneeded = async () => {
+      try {
+        if (pc.signalingState !== 'stable') return;
+        pc._makingOffer = true;
+        const d = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(d);
+        this.signal(id, { sdp: pc.localDescription });
+      } catch (e) { /* ignore */ } finally { pc._makingOffer = false; }
+    };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed') pc.restartIce?.();
+      this.emitChange();
     };
     return pc;
   }
 
   async offer(id) {
     const pc = this.pcFor(id);
-    if (pc.signalingState !== 'stable' || pc.localDescription) return;
+    if (pc.signalingState !== 'stable') return;
     try {
+      pc._makingOffer = true;
       const o = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(o);
       this.signal(id, { sdp: pc.localDescription });
-    } catch (e) { /* the other side will offer */ }
+    } catch (e) { /* the other side will offer */ } finally { pc._makingOffer = false; }
   }
 
   async onSignal(m) {
@@ -190,17 +213,17 @@ export class VoiceChat {
     const pc = this.pcFor(id);
     try {
       if (m.sdp) {
+        const offerCollision = m.sdp.type === 'offer' && (pc._makingOffer || pc.signalingState !== 'stable');
+        pc._ignoreOffer = !pc._polite && offerCollision;
+        if (pc._ignoreOffer) return;
+        await pc.setRemoteDescription(m.sdp);
         if (m.sdp.type === 'offer') {
-          if (pc.signalingState !== 'stable') await pc.setLocalDescription(await pc.createAnswer()).catch(() => {});
-          await pc.setRemoteDescription(m.sdp);
           const a = await pc.createAnswer();
           await pc.setLocalDescription(a);
           this.signal(id, { sdp: pc.localDescription });
-        } else if (pc.signalingState === 'have-local-offer') {
-          await pc.setRemoteDescription(m.sdp);
         }
       } else if (m.ice) {
-        try { await pc.addIceCandidate(m.ice); } catch (e) { /* arrives before the offer now and then */ }
+        try { await pc.addIceCandidate(m.ice); } catch (e) { if (!pc._ignoreOffer) throw e; }
       }
     } catch (e) { /* a broken handshake re-offers on the next join */ }
   }
@@ -250,7 +273,14 @@ export class VoiceChat {
     // turning it off in the panel sticks, it doesn't come back on its own
     if (!this._auto && this.o.mp?.live) { this._auto = true; this.setEnabled(true); }
     const ctx = this.ctx;
+    if (!ctx) {
+      if (this.enabled || this.peers.size) {
+        this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+        if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      }
+    }
     if (!ctx || (!this.peers.size && !this.enabled)) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     const cam = this.o.camera;
     if (!cam) return;
     cam.updateMatrixWorld();

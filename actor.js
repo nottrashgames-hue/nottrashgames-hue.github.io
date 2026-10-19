@@ -257,6 +257,29 @@ export class Actor {
     if (L.length > 30) L.shift();
   }
 
+  /**
+   * Someone else's body (a puppet): show a hit its owner already took (multiplayer: the owner's
+   * Actor.onHurt, sent in the part's own frame so it lands on the same spot of this copy however
+   * the two poses differ) - the hole, dent or gash, and its bleeding, made here by our own
+   * wounds / blood systems. Nothing is forwarded back.
+   * m = { k: 'shot'|'struck'|'dent', part, p, d, n?, w?, weapon?, fd? } (p: local point, d / n: local directions)
+   */
+  showHit(m) {
+    const g = this.groups[m.part];
+    if (!g || this.rd?.parts[m.part]?.gone) return;
+    g.updateWorldMatrix(true, false);
+    const q = g.getWorldQuaternion(new THREE.Quaternion());
+    const P = g.localToWorld(new THREE.Vector3().fromArray(m.p));
+    const D = new THREE.Vector3().fromArray(m.d).applyQuaternion(q);
+    const N = m.n ? new THREE.Vector3().fromArray(m.n).applyQuaternion(q) : null;
+    this._shown = true;
+    try {
+      if (m.k === 'shot') this.shot(m.part, P, D, m.weapon);
+      else if (m.k === 'struck') this.struck(m.part, P, D, N, m.w, null);
+      else if (m.k === 'dent') this.wounds?.dent(m.part, P, D, m.fd);
+    } finally { this._shown = false; }
+  }
+
   /** Hit by a bullet on part `name` at world `point`, travelling along `dir`. */
   shot(name, point, dir, weapon = null) {
     // (admin.js: god mode - nothing touches you)
@@ -265,10 +288,14 @@ export class Actor {
     this._weapon = { weapon: weapon || 'Gunshot', kind: 'gun' }; this._weaponT = performance.now();
     if (this.remote) {
       // the wound shows here; the body's owner takes the hit for real
-      this.onRemoteHit?.('shot', name, point, dir, weapon);
+      // (_shown: a hit its owner already took, replayed here only to show it - showHit)
+      if (!this._shown) this.onRemoteHit?.('shot', name, point, dir, weapon);
       this.wounds?.gunshot(name, point, dir, weapon);
       return;
     }
+    // our own body took it: everyone else's copy shows the same hole (and bleeds from it there)
+    // (hitFrom: who fired it, set by the session while it applies a forwarded hit - their copy already shows it)
+    Actor.onHurt?.(this, 'shot', name, point, dir, { weapon, by: this.hitFrom });
     const res = this.wounds?.gunshot(name, point, dir, weapon);
     const w = res?.entry, O = res?.organs || { hits: [] };
     const kind = name.replace(/[LR]$/, '');
@@ -342,10 +369,12 @@ export class Actor {
       return;
     }
     // a heavy blunt blow crushes the body in (dent.js) - on every copy that sees this hit
+    // our own body took it: everyone else's copy shows the same dent / cut / bruise
+    if (!this.remote) Actor.onHurt?.(this, 'struck', name, point, vel, { n, w, by });
     const dent = blowDent(kind, speed, w, n);
     if (dent) this.wounds?.dent(name, point, n, dent);
     if (this.remote) {
-      this.onRemoteHit?.('struck', name, point, vel, n, w, by);
+      if (!this._shown) this.onRemoteHit?.('struck', name, point, vel, n, w, by);
       if (w.kind === 'blade') this.wounds?.[w.stab ? 'stab' : 'chop'](name, point, n, vel, w.axis, sev);
       else if (w.kind === 'bite') this.wounds?.bite(name, point, n, sev, true);
       else this.wounds?.injure(name, point, n, vel, sev);

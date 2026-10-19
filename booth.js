@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Reflector } from 'three/addons/objects/Reflector.js';
 import { HAIR_STYLES } from './character.js';
 import { TOPS, BOTTOMS, SHOES, HAIRS, SKIN_PICK, STYLE_NAMES } from './wardrobe.js';
+import { Keyboard } from './vrkeyboard.js';
 
 /*
   The dressing booth in the main menu room: a full-length mirror and, beside it, a panel of
@@ -27,8 +28,9 @@ const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vect
 
 export class DressingBooth {
   /** spot: { mirror: {pos, yaw}, panel: {pos, yaw} }; body(): the player's Character; changed() after each pick. */
-  constructor(scene, spot, body, changed) {
-    this.body = body; this.changed = changed;
+  /** naming: { get(): the name now, set(name) } - the Name row, typed on our own keyboard (vrkeyboard.js). */
+  constructor(scene, spot, body, changed, naming = null) {
+    this.body = body; this.changed = changed; this.naming = naming;
     this.group = new THREE.Group();
     scene.add(this.group);
 
@@ -49,6 +51,9 @@ export class DressingBooth {
     // the panel: laid out once, every option a button
     this.buttons = [];
     let y = PAD;
+    // the name you go by, over your head on everyone's screen: click it to type a new one
+    const nameRow = naming ? { label: 'Name', y, h: BH } : null;
+    if (naming) { this.buttons.push({ key: '__name', x: LX, y, w: RX - LX, h: BH }); y += BH + ROWG; }
     this.rows = ROWS.map(([label, key, items]) => {
       const colors = typeof items[0] === 'number', bw = colors ? SW : TB, bh = colors ? SW : BH;
       const per = Math.floor((RX - LX + G) / (bw + G));
@@ -60,6 +65,7 @@ export class DressingBooth {
       y += Math.ceil(items.length / per) * (bh + G) - G + ROWG;
       return { label, y: top, h: bh };
     });
+    if (nameRow) this.rows.unshift(nameRow);
     const H = this.H = Math.ceil(y - ROWG + PAD);
     this.c = document.createElement('canvas');
     this.c.width = W; this.c.height = H;
@@ -73,6 +79,10 @@ export class DressingBooth {
     pf.position.z = -0.03;
     this.mesh.add(pf);
     this.group.add(this.mesh);
+    // the keyboard comes up just in front of the panel, over its top
+    this.kb = new Keyboard(this.mesh, PW * 0.96);
+    const kbH = PW * 0.96 * this.kb.H / 1024;
+    this.kb.mesh.position.set(0, PH / 2 - kbH / 2 - 0.02, 0.1);
 
     this.rc = new THREE.Raycaster();
     this.hover = -1;
@@ -85,7 +95,7 @@ export class DressingBooth {
     this.draw(-1, true);
   }
 
-  set visible(on) { this.group.visible = on; if (!on) this.laser.visible = false; }
+  set visible(on) { this.group.visible = on; if (!on) { this.laser.visible = false; this.kb?.hide(); } }
 
   /** The reflection only within MIRROR_NEAR m of the mirror (built the first time you come close). */
   nearMirror(camera) {
@@ -111,7 +121,7 @@ export class DressingBooth {
   }
 
   /** What's worn, as a string: redraw when it changes (or the hover moves). */
-  key(hover) { const L = this.body().look; return hover + '|' + ROWS.map(([, k]) => L[k]).join(','); }
+  key(hover) { const L = this.body().look; return hover + '|' + (this.naming?.get() || '') + '|' + ROWS.map(([, k]) => L[k]).join(','); }
 
   draw(hover, force) {
     const k = this.key(hover);
@@ -128,6 +138,16 @@ export class DressingBooth {
     g.textAlign = 'center';
     g.font = 'bold 28px system-ui, sans-serif';
     this.buttons.forEach((b, i) => {
+      if (b.key === '__name') {
+        g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 12);
+        g.fillStyle = i === hover ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.1)'; g.fill();
+        g.textAlign = 'left'; g.fillStyle = '#f2efe8';
+        g.fillText(this.naming.get(), b.x + 18, b.y + b.h / 2 + 1);
+        g.textAlign = 'right'; g.fillStyle = '#ffd65a';
+        g.fillText('✎ Edit', b.x + b.w - 18, b.y + b.h / 2 + 1);
+        g.textAlign = 'center';
+        return;
+      }
       const on = L[b.key] === b.val || (b.key === 'beard' && b.val === null && !L.beard), hov = i === hover;
       g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, b.text ? 12 : 10);
       if (b.text) {
@@ -145,6 +165,11 @@ export class DressingBooth {
   }
 
   pick(o, d) {
+    // (the keyboard's up: it's all you can point at, its keys numbered after the panel's buttons)
+    if (this.kb.open) {
+      const [i, dist] = this.kb.pick(o, d, REACH);
+      return [i >= 0 ? this.buttons.length + i : -1, dist];
+    }
     this.rc.set(o, d);
     const hit = this.rc.intersectObject(this.mesh, false)[0];
     if (!hit || hit.distance > REACH) return [-1, 0];
@@ -153,8 +178,13 @@ export class DressingBooth {
   }
 
   choose(i) {
+    if (this.kb.open) return this.kb.press(i - this.buttons.length) || true;
     const b = this.buttons[i];
     if (!b) return false;
+    if (b.key === '__name') {
+      this.kb.show(this.naming.get(), (name) => { this.naming.set(name); this.draw(this.hover, true); });
+      return true;
+    }
     this.body().restyle({ [b.key]: b.val });
     this.changed?.();
     return true;
@@ -187,7 +217,8 @@ export class DressingBooth {
       hover = this.pick(_p, _d)[0];
     }
     this.hover = hover;
-    this.draw(hover);
+    this.draw(this.kb.open ? -1 : hover);
+    if (this.kb.open) this.kb.draw(hover >= this.buttons.length ? hover - this.buttons.length : -1);
   }
 
   click() { return this.hover >= 0 && this.choose(this.hover); }
