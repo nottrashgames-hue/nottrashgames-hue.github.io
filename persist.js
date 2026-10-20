@@ -73,25 +73,45 @@
     window.__bloodlineBackup = backup;
   }
 
-  window.__persistReady = new Promise(function (resolve) {
-    readFile().then(function (saved) {
-      if (wasEmpty && saved && saved.data && !isEmpty(saved.data)) {
-        for (var k in saved.data) {
-          if (Object.prototype.hasOwnProperty.call(saved.data, k)) { try { localStorage.setItem(k, saved.data[k]); } catch (e) {} }
-        }
-        // (if the write took, put the game in front of the restored save once)
-        if (!isEmpty(snapshot())) {
-          var already = false;
-          try { already = sessionStorage.getItem(RELOADED) === '1'; } catch (e) {}
-          if (!already) {
-            try { sessionStorage.setItem(RELOADED, '1'); } catch (e) {}
-            location.reload();
-            return; // (the page is going away; the game must not start yet)
-          }
+  // The whole game is gated on this promise (index.html imports main.js from it). A promise that
+  // merely never settles is NOT caught by .catch - so if the storage call hangs (the first OPFS
+  // touch can, especially cold, and on the headset it is the *first* thing the page does), the
+  // game would never start and the page would sit loading forever. Resolve once, whatever happens:
+  // a late restore has already had its chance by the time this fires.
+  function startOnce() {
+    var done = false;
+    return function () {
+      if (done) return;
+      done = true;
+      try { startMirroring(); } catch (e) { /* mirroring is a nicety: never let it stop the game */ }
+      resolve();
+    };
+  }
+  var resolve;
+  var gate = new Promise(function (r) { resolve = r; });
+  var ready = startOnce();
+
+  // (a save file that has not answered in a few seconds is not coming: start the game anyway)
+  setTimeout(ready, 4000);
+
+  readFile().then(function (saved) {
+    if (wasEmpty && saved && saved.data && !isEmpty(saved.data)) {
+      for (var k in saved.data) {
+        if (Object.prototype.hasOwnProperty.call(saved.data, k)) { try { localStorage.setItem(k, saved.data[k]); } catch (e) {} }
+      }
+      // (if the write took, put the game in front of the restored save once)
+      if (!isEmpty(snapshot())) {
+        var already = false;
+        try { already = sessionStorage.getItem(RELOADED) === '1'; } catch (e) {}
+        if (!already) {
+          try { sessionStorage.setItem(RELOADED, '1'); } catch (e) {}
+          location.reload();
+          return; // (the page is going away; the game must not start yet)
         }
       }
-      startMirroring();
-      resolve();
-    }).catch(function () { startMirroring(); resolve(); });
-  });
+    }
+    ready();
+  }).catch(function () { ready(); });
+
+  window.__persistReady = gate;
 })();

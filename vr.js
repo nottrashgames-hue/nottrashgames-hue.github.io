@@ -206,19 +206,27 @@ export class VRMode {
 
   async button() {
     if (!navigator.xr?.isSessionSupported) return;
+    // (a grant can already have happened before we even got here: the headset fires sessiongranted
+    // while our modules are still downloading. Read it now, before the await below, or it is lost)
+    const wasGranted = window.__vrGranted === true;
     const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
     if (!ok) return;
     const b = document.createElement('button');
     b.id = 'vr-btn';
     b.type = 'button';
     b.textContent = 'Enter VR';
+    let started = false;
     const start = async () => {
-      if (this.on || this.starting) return;
+      if (started || this.on || this.starting) return;
+      started = true;
       this.starting = true;
       try {
         // (a little under full resolution per eye: the cheapest frame-rate there is on a Quest)
         this.renderer.xr.setFramebufferScaleFactor(0.8);
-        const s = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
+        // (a session granted on the way in: adopt it - asking again is what a warm launch cannot do)
+        let s = null;
+        try { s = navigator.xr.getSession?.() || null; } catch (e) { s = null; }
+        if (!s) s = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
         await this.renderer.xr.setSession(s);
       } catch (e) { console.warn('VR session failed', e); }
       this.starting = false;
@@ -230,7 +238,9 @@ export class VRMode {
     document.body.appendChild(b);
     this.btn = b;
     // came here from another map while in VR: carry straight on in the headset
-    if (window.__vrGranted) start();
+    // (the grant is checked again now - it may have landed during the await above, and the event
+    // listener below would then wait for an event that has already fired)
+    if (wasGranted || window.__vrGranted || navigator.xr.getSession?.()) start();
     else addEventListener('vr-granted', start, { once: true });
   }
 
