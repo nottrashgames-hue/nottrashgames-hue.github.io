@@ -9,8 +9,23 @@ export const G_CAR = 512;        // vehicle chassis
 export const groups = (member, filter) => ((member & 0xffff) << 16) | (filter & 0xffff);
 
 let ready = null;
+/**
+ * Load the physics engine. It is the slowest step of the boot (the module carries its WASM inline,
+ * ~2.8MB) and the only one the game awaits before it can start: if it never finishes loading, the
+ * whole game never starts. So it is given a deadline. On failure or a timeout the promise rejects
+ * with a readable reason instead of hanging forever - main.js reports it - so a broken physics
+ * engine can no longer hold the game on a loading screen indefinitely.
+ */
 export function initRapier() {
-  return (ready ||= RAPIER.init().then(() => RAPIER));
+  if (ready) return ready;
+  ready = Promise.race([
+    RAPIER.init().then(() => RAPIER),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('physics engine timed out')), 30000)),
+  ]).catch((e) => {
+    ready = null;   // (a later attempt can retry rather than being stuck with the rejection)
+    throw e;
+  });
+  return ready;
 }
 
 /** Rapier world with the static level geometry. */

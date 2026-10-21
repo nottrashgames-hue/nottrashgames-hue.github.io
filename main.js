@@ -154,7 +154,21 @@ const { colliders, sun, table, seats } = level;
 const SUN_OFF = level.sunOff || new THREE.Vector3(8, 14, 6);
 // past the fog's far end everything is exactly the sky colour: don't draw it at all
 if (scene.fog?.isFog) { camera.far = Math.min(camera.far, scene.fog.far + 2); camera.updateProjectionMatrix(); }
-await initRapier();
+// The physics engine is the slowest step of the boot and the only one the game awaits. If it fails
+// or the WASM never finishes loading, the game must not sit on a loading screen forever with no
+// explanation: say so on the page and stop cleanly. There is no version of this game without
+// physics, so a readable message beats a silent hang.
+try {
+  await initRapier();
+} catch (e) {
+  const el = document.getElementById('loading');
+  if (el) {
+    el.classList.add('on');
+    el.innerHTML = '<div style="padding:24px;font:14px/1.5 system-ui,sans-serif;color:#ff6b6b">' +
+      'The physics engine failed to load:<br>' + (e && e.message ? e.message : e) + '</div>';
+  }
+  throw e;
+}
 seedRandom(918273);
 const { world, RAPIER } = createPhysics(colliders.solids);
 // who's playing: some users have a body all their own (special.js)
