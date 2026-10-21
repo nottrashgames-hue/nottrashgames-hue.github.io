@@ -57,21 +57,10 @@ export class VoiceChat {
     addEventListener('touchstart', wake);
     addEventListener('click', wake);
 
-    // ---- asking for the microphone ----
-    // The headset app drops straight into VR, and a permission prompt is far easier to answer on
-    // the flat page than through a VR session - so as the *installed* app we ask at once, on load.
-    // (In a plain browser nobody wants a mic prompt just for opening a game: there we wait for the
-    // first tap or key.) Whichever comes first wins; the browser only ever shows the one prompt.
-    const firstAsk = () => {
-      removeEventListener('pointerdown', firstAsk, true);
-      removeEventListener('keydown', firstAsk, true);
-      removeEventListener('touchstart', firstAsk, true);
-      this.ask();
-    };
-    addEventListener('pointerdown', firstAsk, true);
-    addEventListener('keydown', firstAsk, true);
-    addEventListener('touchstart', firstAsk, true);
-    if (installedApp()) this.ask();
+    // ---- the microphone is asked for ONLY when the player turns voice on ----
+    // Nothing here touches the mic during load. Asking on boot (as the installed app used to) put a
+    // permission prompt in front of the game before it had drawn a frame, which stalled startup on
+    // the headset. Voice is opt-in now: the panel's button, and nothing else.
 
     // signalling in, and players leaving
     const net = o.mp?.net;
@@ -269,9 +258,9 @@ export class VoiceChat {
 
   /** Every frame: the listener follows the camera, each voice sits on its owner's head. */
   update(dt) {
-    // once we're in the room, voice opens with it (open mic by default, the game's own design);
-    // turning it off in the panel sticks, it doesn't come back on its own
-    if (!this._auto && this.o.mp?.live) { this._auto = true; this.setEnabled(true); }
+    // Voice no longer opens on its own: it only ever starts when the player turns it on in the
+    // panel. (Opening it automatically meant a mic prompt and an AudioContext during the first
+    // frames of a join, which is what stalled the headset boot.)
     const ctx = this.ctx;
     if (!ctx) {
       if (this.enabled || this.peers.size) {
