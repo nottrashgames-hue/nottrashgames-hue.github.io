@@ -13,7 +13,6 @@
 */
 (function () {
   var FILE = 'bloodline-save.json';
-  var RELOADED = 'bl-save-restored';
 
   function snapshot() {
     var data = {};
@@ -59,7 +58,7 @@
     var body = JSON.stringify(data);
     if (body === last) return Promise.resolve();
     last = body;
-    return writeFile({ v: 1, app: 'bloodline', at: Date.now(), restores: restores, data: data });
+    return writeFile({ v: 1, app: 'bloodline', at: Date.now(), data: data });
   }
 
   // ask the OS/browser not to evict the site's data
