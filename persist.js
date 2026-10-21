@@ -8,8 +8,8 @@
   bloodline-save.json) and, if localStorage ever comes up empty, restores it from that file.
 
   It never changes how the game saves: the game still reads and writes localStorage
-  synchronously. This only keeps a copy behind it. The game waits on window.__persistReady so it
-  can never start (and overwrite the backup with fresh defaults) before the restore has run.
+  synchronously. This only keeps a copy behind it. The game does NOT wait on it: window.__persistReady
+  resolves at once, and a restore happens behind the game. Nothing here can block a boot.
 */
 (function () {
   var FILE = 'bloodline-save.json';
@@ -59,7 +59,7 @@
     var body = JSON.stringify(data);
     if (body === last) return Promise.resolve();
     last = body;
-    return writeFile({ v: 1, app: 'bloodline', at: Date.now(), data: data });
+    return writeFile({ v: 1, app: 'bloodline', at: Date.now(), restores: restores, data: data });
   }
 
   // ask the OS/browser not to evict the site's data
@@ -73,45 +73,37 @@
     window.__bloodlineBackup = backup;
   }
 
-  // The whole game is gated on this promise (index.html imports main.js from it). A promise that
-  // merely never settles is NOT caught by .catch - so if the storage call hangs (the first OPFS
-  // touch can, especially cold, and on the headset it is the *first* thing the page does), the
-  // game would never start and the page would sit loading forever. Resolve once, whatever happens:
-  // a late restore has already had its chance by the time this fires.
-  function startOnce() {
-    var done = false;
-    return function () {
-      if (done) return;
-      done = true;
-      try { startMirroring(); } catch (e) { /* mirroring is a nicety: never let it stop the game */ }
-      resolve();
-    };
-  }
+  // THE GAME IS NEVER GATED ON STORAGE. This is deliberate, and it is the whole point of this file.
+  //
+  // The game used to wait on window.__persistReady before main.js would load, so that a restore
+  // could finish first. That is a trap: a promise that never settles is NOT caught by .catch, and
+  // the first storage touch on a headset can hang indefinitely - so the game never started and the
+  // page sat on the loading screen forever. A save file is not worth an unstartable game.
+  //
+  // So the offer is always resolved immediately. Mirroring starts at once, and the restore runs
+  // behind the game: if it lands in time the first frame reads the saved state (localStorage is
+  // read synchronously by the game, and this callback runs before the first frame is drawn); if it
+  // never lands, the game still runs with whatever localStorage already had. Nothing here can
+  // block the boot, whatever the browser does.
   var resolve;
   var gate = new Promise(function (r) { resolve = r; });
-  var ready = startOnce();
 
-  // (a save file that has not answered in a few seconds is not coming: start the game anyway)
-  setTimeout(ready, 4000);
+  try { startMirroring(); } catch (e) { /* mirroring is a nicety: never let it stop the game */ }
+  resolve();
 
-  readFile().then(function (saved) {
-    if (wasEmpty && saved && saved.data && !isEmpty(saved.data)) {
-      for (var k in saved.data) {
-        if (Object.prototype.hasOwnProperty.call(saved.data, k)) { try { localStorage.setItem(k, saved.data[k]); } catch (e) {} }
-      }
-      // (if the write took, put the game in front of the restored save once)
-      if (!isEmpty(snapshot())) {
-        var already = false;
-        try { already = sessionStorage.getItem(RELOADED) === '1'; } catch (e) {}
-        if (!already) {
-          try { sessionStorage.setItem(RELOADED, '1'); } catch (e) {}
-          location.reload();
-          return; // (the page is going away; the game must not start yet)
+  // (restore is best-effort and strictly after the game is free to start: no reload, no waiting,
+  //  no loop - a restore that reloads is exactly the infinite-loading bug we are removing)
+  try {
+    readFile().then(function (saved) {
+      if (wasEmpty && saved && saved.data && !isEmpty(saved.data)) {
+        for (var k in saved.data) {
+          if (Object.prototype.hasOwnProperty.call(saved.data, k)) { try { localStorage.setItem(k, saved.data[k]); } catch (e) {} }
         }
+        // (record that a restore happened, so a save file is not mistaken for a live session)
+        backup();
       }
-    }
-    ready();
-  }).catch(function () { ready(); });
+    }).catch(function () {});
+  } catch (e) {}
 
   window.__persistReady = gate;
 })();

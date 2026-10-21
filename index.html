@@ -167,7 +167,18 @@
     </div>
   </div>
   <script type="module">
-    (window.__persistReady || Promise.resolve()).then(function () { import('./main.js'); });
+    // The game must ALWAYS start. It is not gated on anything: persistence resolves its own
+    // promise immediately (persist.js), and a failure to import main.js is reported rather than
+    // swallowed. (A module import with no .catch() fails invisibly - and a page that fails
+    // invisibly is a page that sits on the loading screen forever.)
+    import('./main.js').catch(function (e) {
+      var el = document.getElementById('loading');
+      if (el) {
+        el.classList.add('on');
+        el.innerHTML = '<div style="padding:24px;font:14px/1.5 system-ui,sans-serif;color:#ff6b6b">' +
+          'The game failed to load:<br>' + (e && e.message ? e.message : e) + '</div>';
+      }
+    });
   </script>
 </body>
 </html>
